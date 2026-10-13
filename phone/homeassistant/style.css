@@ -1,0 +1,110 @@
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: #0b0e14;
+  color: #f2f4f8;
+  font-family: system-ui, -apple-system, sans-serif;
+  padding: 16px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+h1 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+
+.status {
+  font-size: 0.8rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #2a2f3a;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status.ready { background: #1f4d2e; color: #7fe3a0; }
+.status.error { background: #4d1f24; color: #f28b8b; }
+
+.config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: #c5cbd6;
+}
+
+.field input[type="text"],
+.field input[type="url"],
+.field input[type="password"],
+.field textarea {
+  font: inherit;
+  background: #151a24;
+  color: inherit;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 10px;
+  width: 100%;
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 84px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+
+.field input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  align-self: flex-start;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+button {
+  font-size: 1rem;
+  padding: 10px 16px;
+  border-radius: 10px;
+  border: none;
+  background: #3a63f0;
+  color: white;
+  cursor: pointer;
+}
+
+button:disabled {
+  background: #2a2f3a;
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+#test-button,
+#sync-button {
+  background: #2a2f3a;
+}
+
+.hint {
+  font-size: 0.78rem;
+  color: #8891a0;
+  margin: -6px 0 0;
+}
