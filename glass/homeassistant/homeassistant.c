@@ -65,6 +65,8 @@ typedef struct {
     uint16_t scroll_offset; /* first visible row of the current page */
     uint8_t visible_rows;   /* rows that fit on screen */
     int32_t row_height;
+    int32_t label_width;    /* label column width (left-aligned) */
+    int32_t value_width;    /* value column width (right-aligned) */
     uint8_t language; /* 0=fr 1=en 2=es 3=it 4=de 5=zh-CN */
 } ha_t;
 
@@ -292,6 +294,17 @@ static gm_plugin_result_t homeassistant_start(void *context)
     if (ha.row_height < ROW_MIN_HEIGHT)
         return GM_PLUGIN_ESTATE;
 
+    /* Split the usable width into a label column and a value column with a
+     * fixed gap between them. The value gets a fixed share so long numeric
+     * readings stay whole; the label takes the rest and truncates. */
+    {
+        int32_t usable = (int32_t)display.width - SCREEN_MARGIN * 2;
+        int32_t gap = usable / 12;
+        ha.value_width = usable * 2 / 5;
+        ha.label_width = usable - ha.value_width - gap;
+        if (ha.label_width < 0) ha.label_width = 0;
+    }
+
     root = ha.ui->root_get();
     if (root == 0) return GM_PLUGIN_ESTATE;
     ha.ui->obj_clean(root);
@@ -316,21 +329,23 @@ static gm_plugin_result_t homeassistant_start(void *context)
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         int32_t offset_y = HEADER_HEIGHT
             + (int32_t)row * ha.row_height - (HINT_HEIGHT / 2);
+        /* Two fixed columns: label hugs the left margin, value the right margin.
+         * Sizing both from a single split point (instead of centring each with
+         * its own offset) guarantees a long label can never push the value off
+         * the screen; the label clips with "..." via LABEL_DOT. */
         ha.row_label[row] = make_label(ha.screen, "", 0xB0, true);
         if (ha.row_label[row] == 0) goto no_memory;
-        ha.ui->obj_set_size(ha.row_label[row],
-                             (display.width - SCREEN_MARGIN * 2U) * 3 / 5,
+        ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
                              ha.row_height - 2);
-        ha.ui->obj_align(ha.row_label[row], GM_PLUGIN_LVGL_ALIGN_CENTER,
-                         -(display.width / 10), offset_y);
+        ha.ui->obj_align(ha.row_label[row], GM_PLUGIN_LVGL_ALIGN_LEFT_MID,
+                         SCREEN_MARGIN, offset_y);
 
         ha.row_value[row] = make_label(ha.screen, "", 0xF0, false);
         if (ha.row_value[row] == 0) goto no_memory;
-        ha.ui->obj_set_size(ha.row_value[row],
-                             (display.width - SCREEN_MARGIN * 2U) * 3 / 8,
+        ha.ui->obj_set_size(ha.row_value[row], ha.value_width,
                              ha.row_height - 2);
-        ha.ui->obj_align(ha.row_value[row], GM_PLUGIN_LVGL_ALIGN_CENTER,
-                         (display.width / 8), offset_y);
+        ha.ui->obj_align(ha.row_value[row], GM_PLUGIN_LVGL_ALIGN_RIGHT_MID,
+                         -SCREEN_MARGIN, offset_y);
     }
 
     ha.hint_label = make_label(ha.screen, "", 0x70, false);
