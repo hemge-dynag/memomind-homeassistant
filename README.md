@@ -57,8 +57,9 @@ Boutons : **Enregistrer**, **Tester la connexion**, **Charger les entites**,
 - Navigation **circulaire** (on revient a la premiere apres la derniere).
 
 Chaque page affiche un titre avec sa position `i/n` (et `lignes visibles/total`
-quand la page defile), les lignes `libelle : valeur` qui tiennent a l'ecran, et
-un rappel du geste en bas d'ecran.
+quand la page defile) et les lignes `libelle : valeur` qui tiennent a l'ecran.
+Aucun texte de rappel n'est affiche en bas d'ecran : les gestes se suffisent a
+eux-memes et l'espace est reserve aux lignes.
 
 ## Limites
 

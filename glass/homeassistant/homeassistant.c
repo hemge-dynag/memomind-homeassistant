@@ -204,23 +204,10 @@ static void refresh_page(void)
             }
         }
 
-        if (total_rows > ha.visible_rows) {
-            ha.ui->label_set_text(ha.hint_label,
-                L("Gauche/droite: page  Haut/bas: defiler",
-                  "Left/right: page  Up/down: scroll",
-                  "Izq./der.: página  Arriba/abajo: desplazar",
-                  "Sinistra/destra: pagina  Su/giù: scorrere",
-                  "Links/rechts: Seite  Hoch/runter: scrollen",
-                  "左/右：翻页  上/下：滚动"));
-        } else {
-            ha.ui->label_set_text(ha.hint_label,
-                L("Tete gauche/droite: changer de page",
-                  "Head left/right: change page",
-                  "Cabeza izq./der.: cambiar página",
-                  "Testa sinistra/destra: cambia pagina",
-                  "Kopf links/rechts: Seite wechseln",
-                  "头左/右：切换页面"));
-        }
+        /* Navigation hints were removed at the wearer's request: the head
+         * gestures are discoverable on their own and the text crowded the
+         * rows. The label is kept (empty) so the layout stays unchanged. */
+        ha.ui->label_set_text(ha.hint_label, "");
     }
 }
 
@@ -286,13 +273,17 @@ static gm_plugin_result_t homeassistant_start(void *context)
     rows_area_height = (int32_t)display.height - HEADER_HEIGHT - HINT_HEIGHT
                        - SCREEN_MARGIN;
     /* Fit as many rows as the panel allows, capped by MAX_VISIBLE_ROWS. Rows
-     * beyond that stay in the page buffer and are reached by scrolling. */
+     * beyond that stay in the page buffer and are reached by scrolling. Each
+     * drawn row is sized from this area so the window always fits between the
+     * header and the hint instead of overrunning the hint. */
     ha.visible_rows = (uint8_t)(rows_area_height / ROW_MIN_HEIGHT);
     if (ha.visible_rows > MAX_VISIBLE_ROWS) ha.visible_rows = MAX_VISIBLE_ROWS;
     if (ha.visible_rows == 0U) return GM_PLUGIN_ESTATE;
     ha.row_height = rows_area_height / (int32_t)ha.visible_rows;
     if (ha.row_height < ROW_MIN_HEIGHT)
         return GM_PLUGIN_ESTATE;
+    /* Rows fill rows_area_height exactly; anchor them just under the header. */
+    rows_area_height = (int32_t)ha.visible_rows * ha.row_height;
 
     /* Split the usable width into a label column and a value column with a
      * fixed gap between them. The value gets a fixed share so long numeric
@@ -328,7 +319,11 @@ static gm_plugin_result_t homeassistant_start(void *context)
 
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         int32_t offset_y = HEADER_HEIGHT
-            + (int32_t)row * ha.row_height - (HINT_HEIGHT / 2);
+            + SCREEN_MARGIN / 2
+            + (int32_t)row * ha.row_height
+            + ha.row_height / 2;
+        if (offset_y > (int32_t)display.height - HINT_HEIGHT - ha.row_height / 2)
+            break;
         /* Two fixed columns: label hugs the left margin, value the right margin.
          * Sizing both from a single split point (instead of centring each with
          * its own offset) guarantees a long label can never push the value off
@@ -352,7 +347,7 @@ static gm_plugin_result_t homeassistant_start(void *context)
     if (ha.hint_label == 0) goto no_memory;
     ha.ui->obj_set_size(ha.hint_label, display.width - SCREEN_MARGIN * 2U,
                          HINT_HEIGHT);
-    ha.ui->obj_align(ha.hint_label, GM_PLUGIN_LVGL_ALIGN_BOTTOM_MID, 0, -4);
+    ha.ui->obj_align(ha.hint_label, GM_PLUGIN_LVGL_ALIGN_BOTTOM_MID, 0, 0);
 
     ha.page_count = 0U;
     ha.page_index = 0U;
