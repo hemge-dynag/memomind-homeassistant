@@ -28,31 +28,63 @@
         </label>
         <p id="token-hint" class="hint"></p>
 
-        <label class="field">
-          <span id="entities-label">Entités affichées</span>
-          <textarea id="ha-entities" rows="4" spellcheck="false"></textarea>
-        </label>
-        <p id="entities-hint" class="hint"></p>
-
-        <label class="field">
-          <span id="autorefresh-label">Actualisation automatique</span>
-          <input id="ha-autorefresh" type="checkbox" checked>
-        </label>
-
-        <label class="field">
-          <span id="default-title-label">Titre de la page d’accueil</span>
-          <input id="default-title" type="text" maxlength="32" placeholder="Domicile">
-        </label>
-
         <div class="actions">
-          <button type="submit" id="save-button">Enregistrer</button>
           <button type="button" id="test-button">Tester la connexion</button>
-          <button type="button" id="sync-button">Synchroniser</button>
+          <button type="button" id="load-button">Charger les entités</button>
         </div>
+
+        <label class="field field-inline">
+          <input id="ha-autorefresh" type="checkbox" checked>
+          <span id="autorefresh-label">Actualisation automatique</span>
+        </label>
       </form>
+
+      <section class="picker" id="picker" hidden>
+        <label class="field">
+          <span id="search-label">Rechercher une entité…</span>
+          <input id="search-input" type="search" autocomplete="off" spellcheck="false">
+        </label>
+
+        <div class="picker-columns">
+          <div class="picker-column">
+            <h2 id="available-title" class="column-title">Entités disponibles</h2>
+            <ul id="available-list" class="entity-list"></ul>
+          </div>
+
+          <div class="picker-column">
+            <h2 id="selected-title" class="column-title">Entités de cette page</h2>
+            <ul id="selected-list" class="entity-list selected"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="pages">
+        <div class="pages-header">
+          <h2 id="pages-title" class="column-title">Pages</h2>
+          <button type="button" id="add-page-button" class="small">Ajouter une page</button>
+        </div>
+        <p id="pages-hint" class="hint"></p>
+        <div id="pages-list" class="pages-list"></div>
+      </section>
+
+      <div class="actions actions-main">
+        <button type="submit" id="save-button" form="config-form">Enregistrer</button>
+        <button type="button" id="sync-button">Synchroniser</button>
+      </div>
 
       <p id="glasses-hint" class="hint"></p>
     </main>
+
+    <template id="page-template">
+      <article class="page-card">
+        <div class="page-card-head">
+          <input class="page-title" type="text" maxlength="32" data-role="title">
+          <button type="button" class="small danger" data-role="delete">Supprimer</button>
+        </div>
+        <ul class="page-entities" data-role="entities"></ul>
+        <p class="page-empty hint" data-role="empty"></p>
+      </article>
+    </template>
 
     <script type="module" src="plugin.js"></script>
   </body>

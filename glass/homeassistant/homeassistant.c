@@ -3,10 +3,12 @@
 
 /* Paired with PhoneSDK/examples/homeassistant. The phone connects to a Home
  * Assistant instance, fetches entities grouped into dashboard pages, and pushes
- * every page to this plugin. The wearer flips through the pages hands-free by
- * turning the head left or right; each page shows a title and up to
- * PAGES_ROWS label/value rows (sensor readings, light state, ...). The glasses
- * never talk to Home Assistant directly: all network work stays on the phone.
+ * every page to this plugin. The wearer drives it hands-free: turning the head
+ * left or right flips between pages, while raising or lowering the head
+ * scrolls the rows of the current page when a page holds more sensors than fit
+ * on screen. Each page shows a title and up to MAX_ROWS_PER_PAGE label/value
+ * rows (sensor readings, light state, ...). The glasses never talk to Home
+ * Assistant directly: all network work stays on the phone.
  */
 
 #define PAGES_CHANNEL UINT16_C(0x4841)  /* 'HA': phone -> glasses */
@@ -19,7 +21,12 @@
 #define EVENT_PAGE_CHANGED UINT8_C(1)
 
 #define MAX_PAGES 24U
-#define MAX_ROWS 8U
+/* Rows buffered per page. The visible window is smaller; the rest is reachable
+ * by scrolling with head up/down. */
+#define MAX_ROWS_PER_PAGE 32U
+/* Upper bound on rows drawn at once; the actual count (ha.visible_rows) is
+ * derived from the panel height at start and never exceeds this. */
+#define MAX_VISIBLE_ROWS 8U
 /* Per row: label <= 32 bytes, value <= 24 bytes. Per page title <= 32 bytes. */
 #define MAX_LABEL_BYTES 32U
 #define MAX_VALUE_BYTES 24U
@@ -40,7 +47,7 @@ typedef struct {
 
 typedef struct {
     char title[MAX_TITLE_BYTES + 1U];
-    ha_row_t rows[MAX_ROWS];
+    ha_row_t rows[MAX_ROWS_PER_PAGE];
     uint8_t row_count;
 } ha_page_t;
 
@@ -50,11 +57,13 @@ typedef struct {
     const gm_plugin_libc_extension_api_t *libc;
     gm_plugin_lvgl_obj_t *screen;
     gm_plugin_lvgl_obj_t *title_label;
-    gm_plugin_lvgl_obj_t *row_label[MAX_ROWS];
-    gm_plugin_lvgl_obj_t *row_value[MAX_ROWS];
+    gm_plugin_lvgl_obj_t *row_label[MAX_VISIBLE_ROWS];
+    gm_plugin_lvgl_obj_t *row_value[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *hint_label;
     uint16_t page_count;
     uint16_t page_index;
+    uint16_t scroll_offset; /* first visible row of the current page */
+    uint8_t visible_rows;   /* rows that fit on screen */
     int32_t row_height;
     uint8_t language; /* 0=fr 1=en 2=es 3=it 4=de 5=zh-CN */
 } ha_t;
@@ -125,20 +134,21 @@ static uint16_t read_u16(const uint8_t *data)
     return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
 }
 
-/* Renders the current page: title with an "i/n" position marker, up to
- * MAX_ROWS label/value rows, and a navigation hint. Rows beyond the current
- * page's row_count are blanked so a shorter page never shows stale entries. */
+/* Renders the current page: title with an "i/n" position marker, the visible
+ * slice of label/value rows starting at scroll_offset, and a navigation hint.
+ * Rows past the page's row_count are blanked so a shorter page never shows
+ * stale entries. */
 static void refresh_page(void)
 {
     char title[64];
-    uint32_t row;
+    uint32_t slot;
 
     if (ha.page_count == 0U) {
         ha.ui->label_set_text(ha.title_label,
             L("Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant"));
-        for (row = 0U; row < MAX_ROWS; row++) {
-            ha.ui->label_set_text(ha.row_label[row], "");
-            ha.ui->label_set_text(ha.row_value[row], "");
+        for (slot = 0U; slot < MAX_VISIBLE_ROWS; slot++) {
+            ha.ui->label_set_text(ha.row_label[slot], "");
+            ha.ui->label_set_text(ha.row_value[slot], "");
         }
         ha.ui->label_set_text(ha.hint_label,
             L("En attente du telephone...", "Waiting for the phone...", "Esperando al teléfono...", "In attesa del telefono...", "Warte auf das Telefon...", "正在等待手机..."));
@@ -147,41 +157,90 @@ static void refresh_page(void)
 
     {
         const ha_page_t *page = &ha_pages[ha.page_index];
+        uint16_t total_rows = page->row_count;
+        uint16_t max_offset;
         uint32_t pos = (uint32_t)(ha.page_index + 1U);
         uint32_t total = (uint32_t)ha.page_count;
         int written = 0;
-        /* Title then "i/n" appended manually to avoid snprintf dependency. */
         const char *src = page->title;
+
+        /* Keep the window inside the page after a refresh that shortened it. */
+        max_offset = (total_rows > ha.visible_rows)
+            ? (uint16_t)(total_rows - ha.visible_rows) : 0U;
+        if (ha.scroll_offset > max_offset) ha.scroll_offset = max_offset;
+
+        /* Title then "i/n" appended manually to avoid snprintf dependency. */
         while (*src != '\0' && written < 48) title[written++] = *src++;
         title[written++] = ' ';
         title[written++] = ' ';
-        /* Append position as decimal. */
         if (pos >= 10U) title[written++] = (char)('0' + (pos / 10U) % 10U);
         title[written++] = (char)('0' + pos % 10U);
         title[written++] = '/';
         if (total >= 10U) title[written++] = (char)('0' + (total / 10U) % 10U);
         title[written++] = (char)('0' + total % 10U);
+        /* Scroll position marker when the page overflows the screen. */
+        if (total_rows > ha.visible_rows) {
+            uint16_t last = (uint16_t)(ha.scroll_offset + ha.visible_rows);
+            title[written++] = ' ';
+            if (last >= 10U) title[written++] = (char)('0' + (last / 10U) % 10U);
+            title[written++] = (char)('0' + last % 10U);
+            title[written++] = '/';
+            if (total_rows >= 10U) title[written++] = (char)('0' + (total_rows / 10U) % 10U);
+            title[written++] = (char)('0' + total_rows % 10U);
+        }
         title[written] = '\0';
         ha.ui->label_set_text(ha.title_label, title);
 
-        for (row = 0U; row < MAX_ROWS; row++) {
+        for (slot = 0U; slot < ha.visible_rows; slot++) {
+            uint32_t row = (uint32_t)ha.scroll_offset + slot;
             if (row < page->row_count) {
-                ha.ui->label_set_text(ha.row_label[row], page->rows[row].label);
-                ha.ui->label_set_text(ha.row_value[row], page->rows[row].value);
+                ha.ui->label_set_text(ha.row_label[slot], page->rows[row].label);
+                ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
             } else {
-                ha.ui->label_set_text(ha.row_label[row], "");
-                ha.ui->label_set_text(ha.row_value[row], "");
+                ha.ui->label_set_text(ha.row_label[slot], "");
+                ha.ui->label_set_text(ha.row_value[slot], "");
             }
         }
-    }
 
-    ha.ui->label_set_text(ha.hint_label,
-        L("Tete gauche/droite: changer de page",
-          "Head left/right: change page",
-          "Cabeza izq./der.: cambiar página",
-          "Testa sinistra/destra: cambia pagina",
-          "Kopf links/rechts: Seite wechseln",
-          "头左/右：切换页面"));
+        if (total_rows > ha.visible_rows) {
+            ha.ui->label_set_text(ha.hint_label,
+                L("Gauche/droite: page  Haut/bas: defiler",
+                  "Left/right: page  Up/down: scroll",
+                  "Izq./der.: página  Arriba/abajo: desplazar",
+                  "Sinistra/destra: pagina  Su/giù: scorrere",
+                  "Links/rechts: Seite  Hoch/runter: scrollen",
+                  "左/右：翻页  上/下：滚动"));
+        } else {
+            ha.ui->label_set_text(ha.hint_label,
+                L("Tete gauche/droite: changer de page",
+                  "Head left/right: change page",
+                  "Cabeza izq./der.: cambiar página",
+                  "Testa sinistra/destra: cambia pagina",
+                  "Kopf links/rechts: Seite wechseln",
+                  "头左/右：切换页面"));
+        }
+    }
+}
+
+/* Scrolls the current page by delta rows, clamped to [0, rows-visible]. No-op
+ * when everything already fits on screen. */
+static void scroll_page(int32_t delta)
+{
+    const ha_page_t *page;
+    int32_t max_offset;
+    int32_t next;
+
+    if (ha.page_count == 0U) return;
+    page = &ha_pages[ha.page_index];
+    if (page->row_count <= ha.visible_rows) return;
+
+    max_offset = (int32_t)page->row_count - (int32_t)ha.visible_rows;
+    next = (int32_t)ha.scroll_offset + delta;
+    if (next < 0) next = 0;
+    if (next > max_offset) next = max_offset;
+    if ((uint16_t)next == ha.scroll_offset) return;
+    ha.scroll_offset = (uint16_t)next;
+    refresh_page();
 }
 
 /* Loops through pages in both directions so navigation never sticks at the
@@ -195,6 +254,7 @@ static void change_page(int32_t delta)
         if (wrapped < 0) wrapped += (int32_t)ha.page_count;
         ha.page_index = (uint16_t)wrapped;
     }
+    ha.scroll_offset = 0U;
     refresh_page();
     payload[0] = PROTOCOL_VERSION;
     payload[1] = EVENT_PAGE_CHANGED;
@@ -223,7 +283,12 @@ static gm_plugin_result_t homeassistant_start(void *context)
 
     rows_area_height = (int32_t)display.height - HEADER_HEIGHT - HINT_HEIGHT
                        - SCREEN_MARGIN;
-    ha.row_height = rows_area_height / (int32_t)MAX_ROWS;
+    /* Fit as many rows as the panel allows, capped by MAX_VISIBLE_ROWS. Rows
+     * beyond that stay in the page buffer and are reached by scrolling. */
+    ha.visible_rows = (uint8_t)(rows_area_height / ROW_MIN_HEIGHT);
+    if (ha.visible_rows > MAX_VISIBLE_ROWS) ha.visible_rows = MAX_VISIBLE_ROWS;
+    if (ha.visible_rows == 0U) return GM_PLUGIN_ESTATE;
+    ha.row_height = rows_area_height / (int32_t)ha.visible_rows;
     if (ha.row_height < ROW_MIN_HEIGHT)
         return GM_PLUGIN_ESTATE;
 
@@ -248,7 +313,7 @@ static gm_plugin_result_t homeassistant_start(void *context)
                          HEADER_HEIGHT);
     ha.ui->obj_align(ha.title_label, GM_PLUGIN_LVGL_ALIGN_TOP_MID, 0, 6);
 
-    for (row = 0U; row < MAX_ROWS; row++) {
+    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         int32_t offset_y = HEADER_HEIGHT
             + (int32_t)row * ha.row_height - (HINT_HEIGHT / 2);
         ha.row_label[row] = make_label(ha.screen, "", 0xB0, true);
@@ -286,7 +351,7 @@ no_memory:
     ha.ui->obj_clean(root);
     ha.screen = 0;
     ha.title_label = 0;
-    for (row = 0U; row < MAX_ROWS; row++) {
+    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -310,6 +375,7 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
     if (data[1] == COMMAND_CLEAR) {
         ha.page_count = 0U;
         ha.page_index = 0U;
+        ha.scroll_offset = 0U;
         refresh_page();
         return;
     }
@@ -335,7 +401,7 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
         if (offset + 2U > length) break;
         requested_rows = read_u16(&data[offset]);
         offset += 2U;
-        if (requested_rows > MAX_ROWS) requested_rows = MAX_ROWS;
+        if (requested_rows > MAX_ROWS_PER_PAGE) requested_rows = MAX_ROWS_PER_PAGE;
 
         for (r = 0U; r < requested_rows; r++) {
             uint8_t label_len;
@@ -358,6 +424,7 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
     }
     ha.page_count = p;
     if (ha.page_index >= ha.page_count) ha.page_index = 0U;
+    ha.scroll_offset = 0U;
     refresh_page();
 }
 
@@ -390,6 +457,12 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
         case GM_PLUGIN_IMU_GESTURE_LEFT:
             change_page(-1);
             return true;
+        case GM_PLUGIN_IMU_GESTURE_HEAD_RAISE:
+            scroll_page(-1);
+            return true;
+        case GM_PLUGIN_IMU_GESTURE_HEAD_LOWER:
+            scroll_page(1);
+            return true;
         default:
             break;
         }
@@ -407,13 +480,15 @@ static void homeassistant_stop(void *context)
     if (root != 0) ha.ui->obj_clean(root);
     ha.screen = 0;
     ha.title_label = 0;
-    for (row = 0U; row < MAX_ROWS; row++) {
+    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
     ha.hint_label = 0;
     ha.page_count = 0U;
     ha.page_index = 0U;
+    ha.scroll_offset = 0U;
+    ha.visible_rows = 0U;
 }
 
 gm_plugin_result_t gm_plugin_entry(const gm_plugin_host_api_t *host,

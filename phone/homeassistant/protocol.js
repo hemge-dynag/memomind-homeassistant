@@ -11,7 +11,7 @@ export const COMMAND_CLEAR = 2;
 export const EVENT_PAGE_CHANGED = 1;
 
 export const MAX_PAGES = 24;
-export const MAX_ROWS = 8;
+export const MAX_ROWS = 32;
 export const MAX_LABEL_BYTES = 32;
 export const MAX_VALUE_BYTES = 24;
 export const MAX_TITLE_BYTES = 32;
@@ -41,7 +41,7 @@ export function encodeSetPages(pages) {
       rowChunks.push(new Uint8Array([label.length]), label,
                      new Uint8Array([value.length]), value);
     }
-    const rowCount = rowChunks.length;
+    const rowCount = rows.length;
     chunks.push(
       new Uint8Array([title.length]), title,
       new Uint8Array([rowCount & 0xff, (rowCount >> 8) & 0xff]),

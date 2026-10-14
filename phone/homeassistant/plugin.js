@@ -8,7 +8,7 @@ import {
   encodeSetPages,
 } from './protocol.js';
 import { detectLocale, getStrings, format } from './translations.js';
-import { buildPages, fetchStates, testConnection } from './ha.js';
+import { buildPages, fetchAllEntities, fetchStates, testConnection } from './ha.js';
 
 const S = getStrings(detectLocale());
 
@@ -19,33 +19,57 @@ const gm = createGMPlugin();
 const els = {
   url: document.querySelector('#ha-url'),
   token: document.querySelector('#ha-token'),
-  entities: document.querySelector('#ha-entities'),
   autoRefresh: document.querySelector('#ha-autorefresh'),
   form: document.querySelector('#config-form'),
   testButton: document.querySelector('#test-button'),
+  loadButton: document.querySelector('#load-button'),
   syncButton: document.querySelector('#sync-button'),
+  saveButton: document.querySelector('#save-button'),
   status: document.querySelector('#status'),
-  fallbackTitle: document.querySelector('#default-title'),
   title: document.querySelector('#app-title'),
   urlLabel: document.querySelector('#url-label'),
   tokenLabel: document.querySelector('#token-label'),
   tokenHint: document.querySelector('#token-hint'),
-  entitiesLabel: document.querySelector('#entities-label'),
-  entitiesHint: document.querySelector('#entities-hint'),
-  glassesHint: document.querySelector('#glasses-hint'),
-  saveButton: document.querySelector('#save-button'),
   autoRefreshLabel: document.querySelector('#autorefresh-label'),
-  titleLabel: document.querySelector('#default-title-label'),
+  glassesHint: document.querySelector('#glasses-hint'),
+  picker: document.querySelector('#picker'),
+  searchLabel: document.querySelector('#search-label'),
+  searchInput: document.querySelector('#search-input'),
+  availableTitle: document.querySelector('#available-title'),
+  availableList: document.querySelector('#available-list'),
+  selectedTitle: document.querySelector('#selected-title'),
+  selectedList: document.querySelector('#selected-list'),
+  pagesTitle: document.querySelector('#pages-title'),
+  pagesHint: document.querySelector('#pages-hint'),
+  pagesList: document.querySelector('#pages-list'),
+  addPageButton: document.querySelector('#add-page-button'),
+  pageTemplate: document.querySelector('#page-template'),
 };
 
-let config = { url: '', token: '', entities: '', defaultTitle: '' };
+let config = emptyConfig();
 let connected = false;
 let autoRefreshTimer = null;
+let allEntities = [];
 let entitiesCache = new Map();
+let activePageIndex = 0;
+
+function emptyConfig() {
+  return {
+    url: '',
+    token: '',
+    autoRefresh: true,
+    pages: [{ title: '', entities: [] }],
+  };
+}
 
 function setStatus(text, state = '') {
   els.status.textContent = text;
   els.status.className = `status ${state}`.trim();
+}
+
+function selectedIds() {
+  const page = config.pages[activePageIndex];
+  return new Set(page ? page.entities : []);
 }
 
 function applyStrings() {
@@ -58,58 +82,295 @@ function applyStrings() {
   els.tokenHint.textContent = S.tokenHint;
   els.saveButton.textContent = S.saveButton;
   els.testButton.textContent = S.testButton;
+  els.loadButton.textContent = S.loadEntities;
   els.syncButton.textContent = S.syncNow;
-  els.entitiesLabel.textContent = S.entitiesLabel;
-  els.entities.placeholder = S.entitiesPlaceholder;
-  els.entitiesHint.textContent = S.entitiesHint;
-  els.glassesHint.textContent = S.glassesHint;
+  els.searchLabel.textContent = S.searchPlaceholder;
+  els.searchInput.placeholder = S.searchPlaceholder;
+  els.availableTitle.textContent = S.entitiesAvailable;
+  els.selectedTitle.textContent = S.entitiesSelected;
+  els.pagesTitle.textContent = S.pagesLabel;
+  els.pagesHint.textContent = S.pagesHint;
+  els.addPageButton.textContent = S.addPage;
   els.autoRefreshLabel.textContent = S.autoRefresh;
-  els.titleLabel.textContent = S.titleLabel;
-  els.fallbackTitle.placeholder = S.defaultTitle;
-  setStatus(S.statusStarting);
+  els.glassesHint.textContent = S.glassesHint;
 }
 
-function entityIds() {
-  return config.entities
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
+function isConnectionReady() {
+  return Boolean(config.url.trim() && config.token.trim());
 }
 
 function isConfigured() {
-  return Boolean(config.url.trim() && config.token.trim() && entityIds().length);
+  if (!isConnectionReady()) return false;
+  return config.pages.some((p) => p.entities.length > 0);
 }
+
+// --- persistence -----------------------------------------------------------
 
 async function loadConfig() {
   const result = await gm.storage.get(STORAGE_KEY);
-  if (result.value && typeof result.value === 'object') {
+  const value = result.value;
+  if (value && typeof value === 'object') {
     config = {
-      url: result.value.url || '',
-      token: result.value.token || '',
-      entities: result.value.entities || '',
-      defaultTitle: result.value.defaultTitle || '',
+      url: value.url || '',
+      token: value.token || '',
+      autoRefresh: value.autoRefresh !== false,
+      pages: Array.isArray(value.pages) && value.pages.length
+        ? value.pages.map(normalizePage)
+        : [{ title: '', entities: [] }],
     };
   }
   els.url.value = config.url;
   els.token.value = config.token;
-  els.entities.value = config.entities;
-  els.fallbackTitle.value = config.defaultTitle;
+  els.autoRefresh.checked = config.autoRefresh;
+}
+
+function normalizePage(page) {
+  return {
+    title: typeof page?.title === 'string' ? page.title : '',
+    entities: Array.isArray(page?.entities)
+      ? page.entities.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
+      : [],
+  };
 }
 
 async function persistConfig() {
   config.url = els.url.value.trim();
   config.token = els.token.value.trim();
-  config.entities = els.entities.value;
-  config.defaultTitle = els.fallbackTitle.value.trim();
+  config.autoRefresh = els.autoRefresh.checked;
   await gm.storage.set(STORAGE_KEY, config);
 }
 
-async function pagesFromRemote() {
-  entitiesCache = await fetchStates(config.url, config.token);
-  return buildPages(entityIds(), entitiesCache, {
-    title: config.defaultTitle || S.defaultTitle,
-    maxRows: MAX_ROWS,
+// --- entity picker ---------------------------------------------------------
+
+function entityMatchesFilter(entity, needle) {
+  if (!needle) return true;
+  return entity.label.toLowerCase().includes(needle) || entity.id.toLowerCase().includes(needle);
+}
+
+function renderAvailable() {
+  const needle = els.searchInput.value.trim().toLowerCase();
+  const chosen = selectedIds();
+  const items = allEntities.filter((e) => entityMatchesFilter(e, needle));
+  els.availableList.replaceChildren();
+
+  if (allEntities.length === 0) {
+    els.availableList.append(emptyItem(S.noEntities));
+    return;
+  }
+  if (items.length === 0) {
+    els.availableList.append(emptyItem(S.noEntities));
+    return;
+  }
+
+  for (const entity of items) {
+    els.availableList.append(availableRow(entity, chosen.has(entity.id)));
+  }
+}
+
+function availableRow(entity, checked) {
+  const li = document.createElement('li');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = checked;
+  box.addEventListener('change', () => toggleEntity(entity.id, box.checked));
+
+  const main = document.createElement('label');
+  main.className = 'ent-main';
+  const name = document.createElement('span');
+  name.className = 'ent-name';
+  name.textContent = entity.label;
+  const id = document.createElement('span');
+  id.className = 'ent-id';
+  id.textContent = entity.id;
+  main.append(name, id);
+
+  li.append(box, main);
+  li.addEventListener('click', (event) => {
+    if (event.target === box) return;
+    box.checked = !box.checked;
+    toggleEntity(entity.id, box.checked);
   });
+  return li;
+}
+
+function emptyItem(text) {
+  const li = document.createElement('li');
+  li.className = 'empty';
+  li.textContent = text;
+  return li;
+}
+
+function labelForEntity(id) {
+  const found = allEntities.find((e) => e.id === id);
+  return found ? found.label : id;
+}
+
+function renderSelected() {
+  const page = config.pages[activePageIndex];
+  els.selectedList.replaceChildren();
+  if (!page || page.entities.length === 0) {
+    els.selectedList.append(emptyItem(S.noEntities));
+    return;
+  }
+  page.entities.forEach((id, index) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'ent-name';
+    name.textContent = labelForEntity(id);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove';
+    remove.textContent = S.removeEntity;
+    remove.addEventListener('click', () => removeEntityFromPage(index));
+    li.append(name, remove);
+    els.selectedList.append(li);
+  });
+}
+
+function toggleEntity(id, checked) {
+  const page = config.pages[activePageIndex];
+  if (!page) return;
+  const at = page.entities.indexOf(id);
+  if (checked && at < 0) page.entities.push(id);
+  if (!checked && at >= 0) page.entities.splice(at, 1);
+  renderSelected();
+  renderPages();
+}
+
+function removeEntityFromPage(index) {
+  const page = config.pages[activePageIndex];
+  if (!page) return;
+  page.entities.splice(index, 1);
+  renderAvailable();
+  renderSelected();
+  renderPages();
+}
+
+async function onLoadEntities() {
+  await persistConfig();
+  if (!isConnectionReady()) {
+    setStatus(S.noConnection, 'error');
+    return;
+  }
+  try {
+    setStatus(S.statusLoadingEntities);
+    allEntities = await fetchAllEntities(config.url, config.token);
+    entitiesCache = new Map();
+    els.picker.hidden = false;
+    renderAvailable();
+    renderSelected();
+    setStatus(format(S.statusEntitiesLoaded, { n: allEntities.length }), 'ready');
+  } catch (error) {
+    setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
+  }
+}
+
+// --- pages -----------------------------------------------------------------
+
+function renderPages() {
+  els.pagesList.replaceChildren();
+  config.pages.forEach((page, index) => {
+    els.pagesList.append(pageCard(page, index));
+  });
+}
+
+function pageCard(page, index) {
+  const node = els.pageTemplate.content.firstElementChild.cloneNode(true);
+  node.classList.toggle('active', index === activePageIndex);
+
+  const titleInput = node.querySelector('[data-role="title"]');
+  titleInput.value = page.title;
+  titleInput.placeholder = S.pageTitlePlaceholder;
+  titleInput.addEventListener('input', () => {
+    page.title = titleInput.value;
+    activePageIndex = index;
+  });
+  titleInput.addEventListener('focus', () => setActivePage(index));
+
+  node.querySelector('[data-role="delete"]').textContent = S.deletePage;
+  node.querySelector('[data-role="delete"]').addEventListener('click', (event) => {
+    event.stopPropagation();
+    deletePage(index);
+  });
+
+  const list = node.querySelector('[data-role="entities"]');
+  page.entities.forEach((id, entIndex) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.textContent = labelForEntity(id);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'remove';
+    remove.textContent = S.removeEntity;
+    remove.addEventListener('click', (event) => {
+      event.stopPropagation();
+      setActivePage(index);
+      page.entities.splice(entIndex, 1);
+      renderAll();
+    });
+    li.append(name, remove);
+    list.append(li);
+  });
+
+  const empty = node.querySelector('[data-role="empty"]');
+  empty.textContent = S.noEntities;
+  empty.hidden = page.entities.length > 0;
+
+  node.addEventListener('click', () => setActivePage(index));
+  return node;
+}
+
+function setActivePage(index) {
+  if (index === activePageIndex) return;
+  activePageIndex = index;
+  renderAvailable();
+  renderSelected();
+  renderPages();
+}
+
+function addPage() {
+  if (config.pages.length >= MAX_PAGES) return;
+  config.pages.push({ title: '', entities: [] });
+  activePageIndex = config.pages.length - 1;
+  renderPages();
+  renderSelected();
+  renderAvailable();
+}
+
+function deletePage(index) {
+  if (config.pages.length <= 1) {
+    config.pages[0] = { title: '', entities: [] };
+    activePageIndex = 0;
+  } else {
+    config.pages.splice(index, 1);
+    if (activePageIndex >= config.pages.length) activePageIndex = config.pages.length - 1;
+  }
+  renderPages();
+  renderSelected();
+  renderAvailable();
+}
+
+function renderAll() {
+  renderPages();
+  renderSelected();
+  renderAvailable();
+}
+
+// --- sync to glasses -------------------------------------------------------
+
+async function syncPages() {
+  if (!isConfigured()) {
+    setStatus(S.statusNotConfigured, 'error');
+    return;
+  }
+  try {
+    setStatus(S.statusPushing);
+    entitiesCache = await fetchStates(config.url, config.token);
+    const pages = buildPages(config.pages, entitiesCache, { maxRows: MAX_ROWS });
+    await pushToGlasses(pages);
+  } catch (error) {
+    setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
+  }
 }
 
 async function pushToGlasses(pages) {
@@ -128,31 +389,18 @@ async function pushToGlasses(pages) {
   setStatus(format(S.statusPushed, { n: pages.length, titles }), 'ready');
 }
 
-async function fetchAndPush() {
-  if (!isConfigured()) {
-    setStatus(S.statusNotConfigured, 'error');
-    return;
-  }
-  try {
-    setStatus(S.statusPushing);
-    const pages = await pagesFromRemote();
-    await pushToGlasses(pages);
-  } catch (error) {
-    setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
-  }
-}
+// --- events ----------------------------------------------------------------
 
 async function onTest() {
   await persistConfig();
-  if (!config.url.trim() || !config.token.trim()) {
+  if (!isConnectionReady()) {
     setStatus(S.statusNotConfigured, 'error');
     return;
   }
   try {
     setStatus(S.statusTesting);
     await testConnection(config.url, config.token);
-    const pages = await pagesFromRemote();
-    setStatus(format(S.statusOk, { n: pages.length }), 'ready');
+    setStatus(S.statusOk, 'ready');
   } catch (error) {
     setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
   }
@@ -161,7 +409,7 @@ async function onTest() {
 async function onSave() {
   await persistConfig();
   setStatus(S.statusSaved, 'ready');
-  if (isConfigured() && connected) await fetchAndPush();
+  if (isConfigured() && connected) await syncPages();
 }
 
 function scheduleAutoRefresh() {
@@ -170,7 +418,7 @@ function scheduleAutoRefresh() {
     autoRefreshTimer = null;
   }
   if (els.autoRefresh.checked && connected && isConfigured()) {
-    autoRefreshTimer = setInterval(() => void fetchAndPush(), 60000);
+    autoRefreshTimer = setInterval(() => void syncPages(), 60000);
   }
 }
 
@@ -180,12 +428,12 @@ els.form.addEventListener('submit', (event) => {
 });
 
 els.testButton.addEventListener('click', () => void onTest());
-els.syncButton.addEventListener('click', () => void fetchAndPush());
+els.loadButton.addEventListener('click', () => void onLoadEntities());
+els.syncButton.addEventListener('click', () => void syncPages());
 els.autoRefresh.addEventListener('change', scheduleAutoRefresh);
+els.searchInput.addEventListener('input', renderAvailable);
+els.addPageButton.addEventListener('click', addPage);
 
-// The glasses reports which page the wearer flipped to (page-changed event).
-// Nothing has to happen on the phone yet, but we drain the channel so it stays
-// subscribed and ready for future two-way features.
 const offMessages = gm.plugin.onMessage((message) => {
   if (message.channel !== EVENT_CHANNEL) return;
 });
@@ -195,6 +443,8 @@ async function start() {
     await gm.ready();
     await loadConfig();
     applyStrings();
+    renderPages();
+    renderSelected();
     const info = await gm.device.getInfo();
     connected = Boolean(info.connected);
     setStatus(connected ? S.statusConnected : S.statusDisconnected, connected ? 'ready' : 'error');
@@ -203,7 +453,7 @@ async function start() {
     gm.device.onConnection((event) => {
       connected = Boolean(event.connected);
       setStatus(connected ? S.statusConnected : S.statusDisconnected, connected ? 'ready' : 'error');
-      if (connected && isConfigured()) void fetchAndPush();
+      if (connected && isConfigured()) void syncPages();
       scheduleAutoRefresh();
     });
   } catch (error) {

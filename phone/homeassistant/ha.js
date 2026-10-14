@@ -55,6 +55,24 @@ export async function fetchStates(baseUrl, token) {
   return byId;
 }
 
+// Fetches every entity as a flat, display-ready list sorted by friendly label,
+// for the searchable picker. Each item carries its domain (the part before the
+// dot) so the UI can group or filter by type.
+export async function fetchAllEntities(baseUrl, token) {
+  const states = await fetchStates(baseUrl, token);
+  const list = [];
+  for (const [entityId, state] of states) {
+    const dot = entityId.indexOf('.');
+    list.push({
+      id: entityId,
+      label: entityLabel(state, entityId),
+      domain: dot >= 0 ? entityId.slice(0, dot) : '',
+    });
+  }
+  list.sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
+  return list;
+}
+
 // Friendly label: prefer the entity's friendly_name attribute, otherwise the
 // entity_id with its domain stripped.
 export function entityLabel(state, entityId) {
@@ -74,26 +92,24 @@ export function entityValue(state) {
   return value.length > 24 ? `${value.slice(0, 23)}…` : value;
 }
 
-// Groups a list of entity ids into dashboard pages of at most maxRows rows.
-// Unknown ids are skipped. Returns [] when nothing resolves. A page always
-// carries a title so the glasses header stays informative.
-export function buildPages(entityIds, statesById, { title, maxRows = 8 } = {}) {
-  const rows = [];
-  for (const raw of entityIds) {
-    const id = String(raw || '').trim();
-    if (!id) continue;
-    const state = statesById.get(id);
-    rows.push({ label: entityLabel(state, id), value: entityValue(state) });
+// Maps the user-defined pages to the wire format. Each page keeps its own
+// title and ordered entity list; unknown ids still render (as "—") so a
+// temporarily-unavailable entity does not silently shift the layout. Pages
+// without any entity are dropped. Right now a page can hold up to maxRows
+// rows; the glasses scroll within a page when there are more than fit.
+export function buildPages(pages, statesById, { maxRows = 32 } = {}) {
+  const out = [];
+  for (const page of pages || []) {
+    const entityIds = (page.entities || []).map((id) => String(id || '').trim()).filter(Boolean);
+    if (entityIds.length === 0) continue;
+    const rows = [];
+    for (const id of entityIds.slice(0, maxRows)) {
+      const state = statesById.get(id);
+      rows.push({ label: entityLabel(state, id), value: entityValue(state) });
+    }
+    const index = out.length;
+    const title = page.title || `Page ${index + 1}`;
+    out.push({ title, rows });
   }
-  if (rows.length === 0) return [];
-  const pages = [];
-  for (let i = 0; i < rows.length; i += maxRows) {
-    const chunk = rows.slice(i, i + maxRows);
-    const index = pages.length;
-    pages.push({
-      title: index === 0 ? (title || 'Home') : `${title || 'Home'} ${index + 1}`,
-      rows: chunk,
-    });
-  }
-  return pages;
+  return out;
 }
