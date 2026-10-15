@@ -2,9 +2,11 @@
 
 App **pairée** MemoMind (lunettes + téléphone) qui affiche un **tableau de bord
 Home Assistant** directement sur les lunettes. On change de page en tournant la
-tête à **gauche** ou à **droite**, et on fait **défiler** une page trop longue
-en levant/baissant la tête — le tout sans les mains. Côté téléphone, une **liste
-d'entités avec recherche** permet de composer plusieurs **pages** à la carte.
+tête à **gauche** ou à **droite**, on déplace une **sélection** sur les lignes en
+levant/baissant la tête, et on **exécute l'action** de la ligne sélectionnée
+(allumer/éteindre une lampe, un interrupteur, lancer une scène…) en appuyant sur
+le **bouton** — le tout sans les mains. Côté téléphone, une **liste d'entités
+avec recherche** permet de composer plusieurs **pages** à la carte.
 
 ## Architecture
 
@@ -20,17 +22,19 @@ Home Assistant (REST API /api)
    Lunettes : plugin GMP paire
         |  affiche titre + "i/n" + la fenetre visible de lignes label/valeur
         |  gestes tete LEFT/RIGHT = page precedente/suivante
-        |          tete HEAD_RAISE/HEAD_LOWER = defiler dans la page
-        |  gm ... bt_send(channel 0x4853 = 'HS', EVENT_PAGE_CHANGED)
+        |          tete HEAD_RAISE/HEAD_LOWER = deplacer la selection
+        |          bouton PRIMARY = executer l'action de la ligne selectionnee
+        |  gm ... bt_send(channel 0x4853 = 'HS', EVENT_PAGE_CHANGED / EVENT_ACTION)
         v
-   Telephone : draine l'evenement (reserve pour usage futur)
+   Telephone : agit (POST /api/services/<domain>/<service>) puis resynchronise
 ```
 
 - Le **jeton longue duree** Home Assistant ne quitte jamais le telephone : il
   n'est jamais envoye aux lunettes, il reste dans le stockage prive du plugin et
   dans l'en-tete `Authorization`.
 - Les lunettes ne parlent **jamais** a Home Assistant directement ; tout le
-  reseau reste cote telephone.
+  reseau reste cote telephone. Le bouton des lunettes ne fait qu'envoyer
+  l'identifiant de l'entite selectionnee au telephone, qui appelle le service.
 
 ## Configuration (cote telephone)
 
@@ -52,14 +56,30 @@ Boutons : **Enregistrer**, **Tester la connexion**, **Charger les entites**,
 
 - **Tete a droite** : page suivante.
 - **Tete a gauche** : page precedente.
-- **Tete levee** : defiler vers le haut.
-- **Tete baissee** : defiler vers le bas.
+- **Tete levee** : selection vers le haut.
+- **Tete baissee** : selection vers le bas.
+- **Bouton** : execute l'action de la ligne selectionnee (l'unite est
+  allumee/eteinte, la scene est lancee…).
 - Navigation **circulaire** (on revient a la premiere apres la derniere).
 
 Chaque page affiche un titre avec sa position `i/n` (et `lignes visibles/total`
 quand la page defile) et les lignes `libelle : valeur` qui tiennent a l'ecran.
-Aucun texte de rappel n'est affiche en bas d'ecran : les gestes se suffisent a
-eux-memes et l'espace est reserve aux lignes.
+La ligne selectionnee est mise en surbrillance et reste toujours visible (la
+page defile automatiquement pour la suivre). Aucun texte de rappel n'est affiche
+en bas d'ecran : les gestes se suffisent a eux-memes et l'espace est reserve aux
+lignes.
+
+## Actions (bouton)
+
+Le bouton des lunettes envoie l'`entity_id` de la ligne selectionnee au
+telephone, qui appelle le service Home Assistant correspondant au domaine :
+
+- `light`, `switch`, `fan`, `cover`, … -> `toggle`
+- `scene`, `script`, `automation` -> `turn_on`
+- `button` -> `press`
+
+Les entites sans action utile (capteurs, etc.) resteront sans effet. Les valeurs
+se rafraichissent automatiquement apres chaque action.
 
 ## Limites
 
@@ -81,6 +101,8 @@ eux-memes et l'espace est reserve aux lignes.
 - Telephone : `com.dynag.homeassistant.phone`
 - Canaux de messages : `0x4841` ('HA', telephone -> lunettes),
   `0x4853` ('HS', lunettes -> telephone).
+- Evenements lunettes -> telephone : `EVENT_PAGE_CHANGED`, `EVENT_ACTION`
+  (action de la ligne selectionnee).
 
 ## Structure du depot
 
@@ -88,7 +110,7 @@ eux-memes et l'espace est reserve aux lignes.
 glass/homeassistant/    # homeassistant.c + manifest.json (GMP lunettes)
 phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.1.0.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.2.0.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -98,7 +120,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.1.0.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.2.0.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous

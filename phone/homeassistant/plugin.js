@@ -4,11 +4,12 @@ import {
   EVENT_CHANNEL,
   MAX_PAGES,
   MAX_ROWS,
+  decodeEvent,
   encodeClear,
   encodeSetPages,
 } from './protocol.js';
 import { detectLocale, getStrings, format } from './translations.js';
-import { buildPages, fetchAllEntities, fetchStates, testConnection } from './ha.js';
+import { buildPages, callAction, fetchAllEntities, fetchStates, testConnection } from './ha.js';
 
 const S = getStrings(detectLocale());
 
@@ -436,7 +437,26 @@ els.addPageButton.addEventListener('click', addPage);
 
 const offMessages = gm.plugin.onMessage((message) => {
   if (message.channel !== EVENT_CHANNEL) return;
+  const event = decodeEvent(message.data);
+  if (!event) return;
+  if (event.type === 'action') void onAction(event.action);
 });
+
+// Runs the action of the row selected on the glasses: calls the matching Home
+// Assistant service, then refreshes the dashboard values so the change shows up.
+async function onAction(entityId) {
+  if (!isConnectionReady()) {
+    setStatus(S.statusNotConfigured, 'error');
+    return;
+  }
+  try {
+    setStatus(format(S.statusActionSent, { name: labelForEntity(entityId) }));
+    await callAction(config.url, config.token, entityId);
+    await syncPages();
+  } catch (error) {
+    setStatus(format(S.statusActionFailed, { msg: error.message || String(error) }), 'error');
+  }
+}
 
 async function start() {
   try {

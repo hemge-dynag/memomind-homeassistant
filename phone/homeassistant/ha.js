@@ -37,6 +37,47 @@ async function haFetch(baseUrl, token, path, { timeoutMs = 8000 } = {}) {
   }
 }
 
+// Picks the Home Assistant service that "activates" an entity, based on its
+// domain. Toggle drives lights, switches, fans, covers, ...; scenes and scripts
+// are turned on; buttons are pressed. Unknown domains fall back to toggle.
+function actionService(domain) {
+  if (domain === 'scene' || domain === 'script' || domain === 'automation') return 'turn_on';
+  if (domain === 'button') return 'press';
+  return 'toggle';
+}
+
+// Runs the action bound to a glasses row: POSTs to the matching domain service
+// for that entity id. The token stays on the phone.
+export async function callAction(baseUrl, token, entityId, { timeoutMs = 8000 } = {}) {
+  const id = String(entityId || '').trim();
+  const dot = id.indexOf('.');
+  if (dot <= 0) throw new Error('entité invalide');
+  const domain = id.slice(0, dot);
+  const service = actionService(domain);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(apiUrl(baseUrl, `/api/services/${domain}/${service}`), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ entity_id: id }),
+      signal: controller.signal,
+    });
+    if (response.status === 401) throw new Error('HTTP 401 (jeton invalide)');
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return true;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('délai dépassé');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Verifies the URL + token pair by requesting the API root.
 export async function testConnection(baseUrl, token) {
   if (!normalizeBaseUrl(baseUrl) || !token) throw new Error('configuration incomplète');
@@ -105,7 +146,7 @@ export function buildPages(pages, statesById, { maxRows = 32 } = {}) {
     const rows = [];
     for (const id of entityIds.slice(0, maxRows)) {
       const state = statesById.get(id);
-      rows.push({ label: entityLabel(state, id), value: entityValue(state) });
+      rows.push({ label: entityLabel(state, id), value: entityValue(state), action: id });
     }
     const index = out.length;
     const title = page.title || `Page ${index + 1}`;

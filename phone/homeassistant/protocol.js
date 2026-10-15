@@ -9,12 +9,14 @@ export const COMMAND_SET_PAGES = 1;
 export const COMMAND_CLEAR = 2;
 
 export const EVENT_PAGE_CHANGED = 1;
+export const EVENT_ACTION = 2;
 
 export const MAX_PAGES = 24;
 export const MAX_ROWS = 32;
 export const MAX_LABEL_BYTES = 32;
 export const MAX_VALUE_BYTES = 24;
 export const MAX_TITLE_BYTES = 32;
+export const MAX_ACTION_BYTES = 48;
 
 const encoder = new TextEncoder();
 
@@ -27,7 +29,8 @@ function clampBytes(text, max) {
 // [version, cmd, page_count(2),
 //   { title_len, title,
 //     row_count(2),
-//     { label_len, label, value_len, value } * row_count } * page_count ]
+//     { label_len, label, value_len, value, action_len, action } * row_count } * page_count ]
+// `action` is the entity id the glasses echo back when the row is activated.
 export function encodeSetPages(pages) {
   const list = (pages || []).slice(0, MAX_PAGES);
   const chunks = [];
@@ -38,8 +41,10 @@ export function encodeSetPages(pages) {
     for (const row of rows) {
       const label = clampBytes(row.label, MAX_LABEL_BYTES);
       const value = clampBytes(row.value, MAX_VALUE_BYTES);
+      const action = clampBytes(row.action, MAX_ACTION_BYTES);
       rowChunks.push(new Uint8Array([label.length]), label,
-                     new Uint8Array([value.length]), value);
+                     new Uint8Array([value.length]), value,
+                     new Uint8Array([action.length]), action);
     }
     const rowCount = rows.length;
     chunks.push(
@@ -62,11 +67,18 @@ export function encodeClear() {
   return new Uint8Array([PROTOCOL_VERSION, COMMAND_CLEAR, 0, 0]);
 }
 
-// [version, event, page_index]
+// [version, event, page_index]            -> { type: 'page-changed', index }
+// [version, event, action_len, action...] -> { type: 'action', action }
 export function decodeEvent(data) {
   if (!data || data.length < 3 || data[0] !== PROTOCOL_VERSION) return null;
-  if (data[1] !== EVENT_PAGE_CHANGED) return null;
-  return { type: 'page-changed', index: data[2] };
+  if (data[1] === EVENT_PAGE_CHANGED) return { type: 'page-changed', index: data[2] };
+  if (data[1] === EVENT_ACTION) {
+    const len = data[2];
+    if (data.length < 3 + len) return null;
+    const action = new TextDecoder().decode(data.subarray(3, 3 + len));
+    return { type: 'action', action };
+  }
+  return null;
 }
 
 function concat(arrays) {

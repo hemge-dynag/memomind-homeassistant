@@ -4,11 +4,14 @@
 /* Paired with PhoneSDK/examples/homeassistant. The phone connects to a Home
  * Assistant instance, fetches entities grouped into dashboard pages, and pushes
  * every page to this plugin. The wearer drives it hands-free: turning the head
- * left or right flips between pages, while raising or lowering the head
- * scrolls the rows of the current page when a page holds more sensors than fit
- * on screen. Each page shows a title and up to MAX_ROWS_PER_PAGE label/value
- * rows (sensor readings, light state, ...). The glasses never talk to Home
- * Assistant directly: all network work stays on the phone.
+ * left or right flips between pages, while raising or lowering the head moves a
+ * selection cursor up or down the rows (the view scrolls to follow it when a
+ * page holds more rows than fit on screen). Pressing the primary button runs the
+ * action of the selected row: the glasses send the row's entity id back to the
+ * phone, which calls the matching Home Assistant service (toggle a light, a
+ * switch, run a scene...). Each page shows a title and up to MAX_ROWS_PER_PAGE
+ * label/value rows (sensor readings, light state, ...). The glasses never talk
+ * to Home Assistant directly: all network work stays on the phone.
  */
 
 #define PAGES_CHANNEL UINT16_C(0x4841)  /* 'HA': phone -> glasses */
@@ -19,6 +22,7 @@
 #define COMMAND_CLEAR 2U
 
 #define EVENT_PAGE_CHANGED UINT8_C(1)
+#define EVENT_ACTION UINT8_C(2)
 
 #define MAX_PAGES 24U
 /* Rows buffered per page. The visible window is smaller; the rest is reachable
@@ -27,15 +31,21 @@
 /* Upper bound on rows drawn at once; the actual count (ha.visible_rows) is
  * derived from the panel height at start and never exceeds this. */
 #define MAX_VISIBLE_ROWS 8U
-/* Per row: label <= 32 bytes, value <= 24 bytes. Per page title <= 32 bytes. */
+/* Per row: label <= 32 bytes, value <= 24 bytes, action <= 48 bytes (the entity
+ * id echoed back to the phone when the row is activated). Per page title <= 32
+ * bytes. */
 #define MAX_LABEL_BYTES 32U
 #define MAX_VALUE_BYTES 24U
 #define MAX_TITLE_BYTES 32U
+#define MAX_ACTION_BYTES 48U
 
 /* version(1) + command(1) + page_count(2) */
 #define MIN_SET_PAGES_PAYLOAD 4U
 
 #define SCREEN_MARGIN 16
+/* The value column is right-aligned; keep it clear of the right edge with a
+ * slightly wider margin than the left so the reading never hugs the border. */
+#define RIGHT_MARGIN 30
 #define HEADER_HEIGHT 44
 #define HINT_HEIGHT 28
 #define ROW_MIN_HEIGHT 26
@@ -43,6 +53,7 @@
 typedef struct {
     char label[MAX_LABEL_BYTES + 1U];
     char value[MAX_VALUE_BYTES + 1U];
+    char action[MAX_ACTION_BYTES + 1U];
 } ha_row_t;
 
 typedef struct {
@@ -57,12 +68,14 @@ typedef struct {
     const gm_plugin_libc_extension_api_t *libc;
     gm_plugin_lvgl_obj_t *screen;
     gm_plugin_lvgl_obj_t *title_label;
+    gm_plugin_lvgl_obj_t *row_bg[MAX_VISIBLE_ROWS]; /* selection highlight */
     gm_plugin_lvgl_obj_t *row_label[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *row_value[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *hint_label;
     uint16_t page_count;
     uint16_t page_index;
     uint16_t scroll_offset; /* first visible row of the current page */
+    uint16_t selected;      /* selected row index within the page */
     uint8_t visible_rows;   /* rows that fit on screen */
     int32_t row_height;
     int32_t label_width;    /* label column width (left-aligned) */
@@ -151,6 +164,7 @@ static void refresh_page(void)
         for (slot = 0U; slot < ha.visible_rows; slot++) {
             ha.ui->label_set_text(ha.row_label[slot], "");
             ha.ui->label_set_text(ha.row_value[slot], "");
+            set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
         }
         ha.ui->label_set_text(ha.hint_label,
             L("En attente du telephone...", "Waiting for the phone...", "Esperando al teléfono...", "In attesa del telefono...", "Warte auf das Telefon...", "正在等待手机..."));
@@ -195,6 +209,7 @@ static void refresh_page(void)
 
         for (slot = 0U; slot < ha.visible_rows; slot++) {
             uint32_t row = (uint32_t)ha.scroll_offset + slot;
+            bool is_selected = (row < page->row_count) && ((uint16_t)row == ha.selected);
             if (row < page->row_count) {
                 ha.ui->label_set_text(ha.row_label[slot], page->rows[row].label);
                 ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
@@ -202,6 +217,10 @@ static void refresh_page(void)
                 ha.ui->label_set_text(ha.row_label[slot], "");
                 ha.ui->label_set_text(ha.row_value[slot], "");
             }
+            /* Highlight the selected row; the others keep a transparent
+             * background so the highlight follows the cursor. */
+            set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA,
+                      number(is_selected ? 255 : 0));
         }
 
         /* Navigation hints were removed at the wearer's request: the head
@@ -211,29 +230,69 @@ static void refresh_page(void)
     }
 }
 
-/* Scrolls the current page by delta rows, clamped to [0, rows-visible]. No-op
- * when everything already fits on screen. */
-static void scroll_page(int32_t delta)
+/* Keeps the selected row inside the visible window, scrolling the page as
+ * needed so the cursor can never leave the screen. */
+static void ensure_selection_visible(void)
+{
+    if (ha.selected < ha.scroll_offset) {
+        ha.scroll_offset = ha.selected;
+    } else if ((uint32_t)ha.selected >=
+               (uint32_t)ha.scroll_offset + ha.visible_rows) {
+        ha.scroll_offset = (uint16_t)(ha.selected - ha.visible_rows + 1U);
+    }
+}
+
+/* Moves the selection cursor by delta rows, clamped to the current page, and
+ * scrolls so the cursor stays visible. No-op when the gesture would not move. */
+static void move_selection(int32_t delta)
 {
     const ha_page_t *page;
-    int32_t max_offset;
     int32_t next;
 
     if (ha.page_count == 0U) return;
     page = &ha_pages[ha.page_index];
-    if (page->row_count <= ha.visible_rows) return;
+    if (page->row_count == 0U) return;
 
-    max_offset = (int32_t)page->row_count - (int32_t)ha.visible_rows;
-    next = (int32_t)ha.scroll_offset + delta;
+    next = (int32_t)ha.selected + delta;
     if (next < 0) next = 0;
-    if (next > max_offset) next = max_offset;
-    if ((uint16_t)next == ha.scroll_offset) return;
-    ha.scroll_offset = (uint16_t)next;
+    if (next >= (int32_t)page->row_count) next = (int32_t)page->row_count - 1;
+    if ((uint16_t)next == ha.selected) return;
+    ha.selected = (uint16_t)next;
+    ensure_selection_visible();
     refresh_page();
 }
 
+/* Sends the selected row's action (entity id) to the phone so it can run the
+ * matching Home Assistant service. Ignored when the row carries no action. */
+static void run_action(void)
+{
+    const ha_page_t *page;
+    const char *action;
+    uint8_t payload[3U + MAX_ACTION_BYTES];
+    uint8_t len = 0U;
+
+    if (ha.page_count == 0U) return;
+    page = &ha_pages[ha.page_index];
+    if (ha.selected >= page->row_count) return;
+
+    action = page->rows[ha.selected].action;
+    while (action[len] != '\0' && len < MAX_ACTION_BYTES) {
+        payload[3U + len] = (uint8_t)action[len];
+        len++;
+    }
+    if (len == 0U) return;
+
+    payload[0] = PROTOCOL_VERSION;
+    payload[1] = EVENT_ACTION;
+    payload[2] = len;
+    ha.host->log("homeassistant: action row=%u len=%u",
+                  (unsigned int)ha.selected, (unsigned int)len);
+    (void)ha.host->bt_send(EVENT_CHANNEL, payload, 3U + len);
+}
+
 /* Loops through pages in both directions so navigation never sticks at the
- * ends. Only fires when there is more than one page. */
+ * ends. Only fires when there is more than one page. Resets the selection to
+ * the first row of the newly shown page. */
 static void change_page(int32_t delta)
 {
     uint8_t payload[3];
@@ -244,6 +303,7 @@ static void change_page(int32_t delta)
         ha.page_index = (uint16_t)wrapped;
     }
     ha.scroll_offset = 0U;
+    ha.selected = 0U;
     refresh_page();
     payload[0] = PROTOCOL_VERSION;
     payload[1] = EVENT_PAGE_CHANGED;
@@ -292,9 +352,11 @@ static gm_plugin_result_t homeassistant_start(void *context)
 
     /* Split the usable width into a label column and a value column with a
      * fixed gap between them. The value gets a fixed share so long numeric
-     * readings stay whole; the label takes the rest and truncates. */
+     * readings stay whole; the label takes the rest and truncates. The value
+     * column stops short of the right edge (RIGHT_MARGIN) so it never hugs the
+     * border. */
     {
-        int32_t usable = (int32_t)display.width - SCREEN_MARGIN * 2;
+        int32_t usable = (int32_t)display.width - SCREEN_MARGIN - RIGHT_MARGIN;
         int32_t gap = usable / 12;
         ha.value_width = usable * 2 / 5;
         ha.label_width = usable - ha.value_width - gap;
@@ -326,12 +388,26 @@ static gm_plugin_result_t homeassistant_start(void *context)
         /* Absolute placement via obj_set_pos (top-left in logical pixels) keeps
          * the rows inside the area below the header without depending on the
          * alignment point's origin. Two fixed columns: label hugs the left
-         * margin, value the right margin. Sizing both from a single split point
-         * guarantees a long label can never push the value off the screen; the
-         * label clips with "..." via LABEL_DOT. */
+         * margin, value stops before the right margin. Sizing both from a single
+         * split point guarantees a long label can never push the value off the
+         * screen; the label clips with "..." via LABEL_DOT. A background
+         * rectangle sits behind each row and is made opaque only for the
+         * selected row, drawing the selection cursor. */
         int32_t top_y = HEADER_HEIGHT + SCREEN_MARGIN / 2
             + (int32_t)row * ha.row_height;
-        ha.row_label[row] = make_label(ha.screen, "", 0xB0, true);
+
+        ha.row_bg[row] = ha.ui->obj_create(ha.screen);
+        if (ha.row_bg[row] == 0) goto no_memory;
+        ha.ui->obj_set_size(ha.row_bg[row],
+                             (int32_t)display.width - SCREEN_MARGIN - RIGHT_MARGIN,
+                             ha.row_height - 2);
+        ha.ui->obj_set_pos(ha.row_bg[row], SCREEN_MARGIN, top_y);
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0x38));
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_RADIUS, number(6));
+        ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+
+        ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
         if (ha.row_label[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
                              ha.row_height - 2);
@@ -342,7 +418,7 @@ static gm_plugin_result_t homeassistant_start(void *context)
         ha.ui->obj_set_size(ha.row_value[row], ha.value_width,
                              ha.row_height - 2);
         ha.ui->obj_set_pos(ha.row_value[row],
-                           (int32_t)display.width - SCREEN_MARGIN - ha.value_width,
+                           (int32_t)display.width - RIGHT_MARGIN - ha.value_width,
                            top_y);
     }
 
@@ -354,6 +430,8 @@ static gm_plugin_result_t homeassistant_start(void *context)
 
     ha.page_count = 0U;
     ha.page_index = 0U;
+    ha.scroll_offset = 0U;
+    ha.selected = 0U;
     refresh_page();
 
     if (ha.host->imu_enable(GM_PLUGIN_IMU_ENABLE_GESTURES) != GM_PLUGIN_OK)
@@ -365,6 +443,7 @@ no_memory:
     ha.screen = 0;
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
+        ha.row_bg[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -389,6 +468,7 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
         ha.page_count = 0U;
         ha.page_index = 0U;
         ha.scroll_offset = 0U;
+        ha.selected = 0U;
         refresh_page();
         return;
     }
@@ -419,6 +499,7 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
         for (r = 0U; r < requested_rows; r++) {
             uint8_t label_len;
             uint8_t value_len;
+            uint8_t action_len;
             if (offset + 1U > length) break;
             label_len = data[offset++];
             if (label_len > MAX_LABEL_BYTES || offset + label_len > length) break;
@@ -432,12 +513,20 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
             ha.libc->memcpy(page->rows[r].value, &data[offset], value_len);
             page->rows[r].value[value_len] = '\0';
             offset += value_len;
+
+            if (offset + 1U > length) break;
+            action_len = data[offset++];
+            if (action_len > MAX_ACTION_BYTES || offset + action_len > length) break;
+            ha.libc->memcpy(page->rows[r].action, &data[offset], action_len);
+            page->rows[r].action[action_len] = '\0';
+            offset += action_len;
         }
         page->row_count = (uint8_t)r;
     }
     ha.page_count = p;
     if (ha.page_index >= ha.page_count) ha.page_index = 0U;
     ha.scroll_offset = 0U;
+    ha.selected = 0U;
     ha.host->log("homeassistant: set_pages count=%u page0_rows=%u visible=%u",
                   (unsigned int)ha.page_count,
                   (unsigned int)(ha.page_count ? ha_pages[0].row_count : 0U),
@@ -465,15 +554,23 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
 
     if (ha.page_count == 0U) return false;
 
+    if (event->type == GM_PLUGIN_EVENT_BUTTON &&
+        event->data.button.button == GM_PLUGIN_BUTTON_PRIMARY &&
+        event->data.button.action == GM_PLUGIN_BUTTON_ACTION_SINGLE) {
+        run_action();
+        return true;
+    }
+
     if (event->type == GM_PLUGIN_EVENT_IMU_GESTURE &&
         event->data.imu_gesture.active) {
-        ha.host->log("homeassistant: gesture=%u active=%u page=%u rows=%u visible=%u scroll=%u",
+        ha.host->log("homeassistant: gesture=%u active=%u page=%u rows=%u visible=%u scroll=%u sel=%u",
                       (unsigned int)event->data.imu_gesture.gesture,
                       (unsigned int)event->data.imu_gesture.active,
                       (unsigned int)ha.page_index,
                       (unsigned int)(ha.page_count ? ha_pages[ha.page_index].row_count : 0U),
                       (unsigned int)ha.visible_rows,
-                      (unsigned int)ha.scroll_offset);
+                      (unsigned int)ha.scroll_offset,
+                      (unsigned int)ha.selected);
         switch (event->data.imu_gesture.gesture) {
         case GM_PLUGIN_IMU_GESTURE_RIGHT:
             change_page(1);
@@ -482,10 +579,10 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
             change_page(-1);
             return true;
         case GM_PLUGIN_IMU_GESTURE_HEAD_RAISE:
-            scroll_page(-1);
+            move_selection(-1);
             return true;
         case GM_PLUGIN_IMU_GESTURE_HEAD_LOWER:
-            scroll_page(1);
+            move_selection(1);
             return true;
         default:
             break;
@@ -505,6 +602,7 @@ static void homeassistant_stop(void *context)
     ha.screen = 0;
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
+        ha.row_bg[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -512,6 +610,7 @@ static void homeassistant_stop(void *context)
     ha.page_count = 0U;
     ha.page_index = 0U;
     ha.scroll_offset = 0U;
+    ha.selected = 0U;
     ha.visible_rows = 0U;
 }
 
@@ -519,7 +618,7 @@ gm_plugin_result_t gm_plugin_entry(const gm_plugin_host_api_t *host,
                                     gm_plugin_descriptor_t *plugin)
 {
     const gm_plugin_capabilities_t required =
-        GM_PLUGIN_CAP_BLUETOOTH | GM_PLUGIN_CAP_IMU_EVENTS;
+        GM_PLUGIN_CAP_BLUETOOTH | GM_PLUGIN_CAP_BUTTON | GM_PLUGIN_CAP_IMU_EVENTS;
 
     if (host == 0 || plugin == 0 || host->log == 0 || host->bt_send == 0 ||
         host->display_get_info == 0 || host->graphics.lvgl == 0 ||
