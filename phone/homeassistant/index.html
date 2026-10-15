@@ -11,80 +11,67 @@
   <body>
     <header class="app-header">
       <h1 id="app-title">Home Assistant</h1>
-      <span id="status" class="status">Démarrage…</span>
+      <button type="button" id="settings-button" class="ghost small" hidden>Réglages</button>
     </header>
 
     <main>
-      <form id="config-form" class="config-form">
-        <label class="field">
-          <span id="url-label">URL de Home Assistant</span>
-          <input id="ha-url" type="url" inputmode="url" autocomplete="off"
-                 placeholder="http://homeassistant.local:8123" required>
-        </label>
-
-        <label class="field">
-          <span id="token-label">Jeton d’accès longue durée</span>
-          <input id="ha-token" type="password" autocomplete="off" required>
-        </label>
-        <p id="token-hint" class="hint"></p>
-
-        <div class="actions">
-          <button type="button" id="test-button">Tester la connexion</button>
-          <button type="button" id="load-button">Charger les entités</button>
+      <!-- Main screen: connection state + sync on top, then the cards. -->
+      <section id="main-screen">
+        <div class="topbar">
+          <span id="status" class="status">Démarrage…</span>
+          <button type="button" id="sync-button">Synchroniser</button>
         </div>
 
-        <label class="field field-inline">
-          <input id="ha-autorefresh" type="checkbox" checked>
-          <span id="autorefresh-label">Actualisation automatique</span>
-        </label>
-      </form>
-
-      <section class="picker" id="picker" hidden>
-        <label class="field">
-          <span id="search-label">Rechercher une entité…</span>
-          <input id="search-input" type="search" autocomplete="off" spellcheck="false">
-        </label>
-
-        <div class="picker-columns">
-          <div class="picker-column">
-            <h2 id="available-title" class="column-title">Entités disponibles</h2>
-            <ul id="available-list" class="entity-list"></ul>
+        <section class="cards">
+          <div class="cards-header">
+            <h2 id="cards-title" class="column-title">Cartes</h2>
+            <button type="button" id="add-card-button" class="small">Ajouter une carte</button>
           </div>
+          <p id="cards-hint" class="hint"></p>
+          <div id="cards-list" class="cards-list"></div>
+        </section>
 
-          <div class="picker-column">
-            <h2 id="selected-title" class="column-title">Entités de cette page</h2>
-            <ul id="selected-list" class="entity-list selected"></ul>
-          </div>
-        </div>
+        <p id="glasses-hint" class="hint"></p>
       </section>
 
-      <section class="pages">
-        <div class="pages-header">
-          <h2 id="pages-title" class="column-title">Pages</h2>
-          <button type="button" id="add-page-button" class="small">Ajouter une page</button>
+      <!-- Settings screen: URL, token, refresh delay, entity loading. -->
+      <section id="settings-screen" hidden>
+        <div class="settings-head">
+          <h2 id="settings-title" class="column-title">Réglages</h2>
+          <button type="button" id="back-button" class="ghost small">Retour</button>
         </div>
-        <p id="pages-hint" class="hint"></p>
-        <div id="pages-list" class="pages-list"></div>
+        <p id="settings-hint" class="hint"></p>
+
+        <form id="config-form" class="config-form">
+          <label class="field">
+            <span id="url-label">URL de Home Assistant</span>
+            <input id="ha-url" type="url" inputmode="url" autocomplete="off"
+                   placeholder="http://homeassistant.local:8123">
+          </label>
+
+          <label class="field">
+            <span id="token-label">Jeton d’accès longue durée</span>
+            <input id="ha-token" type="password" autocomplete="off">
+          </label>
+          <p id="token-hint" class="hint"></p>
+
+          <label class="field">
+            <span id="autorefresh-label">Délai d’actualisation (minutes)</span>
+            <input id="ha-autorefresh" type="number" min="1" max="1440" step="1" inputmode="numeric" value="10">
+          </label>
+          <p id="autorefresh-hint" class="hint"></p>
+
+          <div class="actions">
+            <button type="button" id="test-button">Tester la connexion</button>
+            <button type="button" id="load-button">Charger les entités</button>
+          </div>
+
+          <div class="actions actions-main">
+            <button type="submit" id="save-settings-button">Enregistrer</button>
+          </div>
+        </form>
       </section>
-
-      <div class="actions actions-main">
-        <button type="submit" id="save-button" form="config-form">Enregistrer</button>
-        <button type="button" id="sync-button">Synchroniser</button>
-      </div>
-
-      <p id="glasses-hint" class="hint"></p>
     </main>
-
-    <template id="page-template">
-      <article class="page-card">
-        <div class="page-card-head">
-          <input class="page-title" type="text" maxlength="32" data-role="title">
-          <button type="button" class="small danger" data-role="delete">Supprimer</button>
-        </div>
-        <ul class="page-entities" data-role="entities"></ul>
-        <p class="page-empty hint" data-role="empty"></p>
-      </article>
-    </template>
 
     <script type="module" src="plugin.js"></script>
   </body>

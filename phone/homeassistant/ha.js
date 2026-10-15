@@ -133,23 +133,38 @@ export function entityValue(state) {
   return value.length > 24 ? `${value.slice(0, 23)}…` : value;
 }
 
-// Maps the user-defined pages to the wire format. Each page keeps its own
-// title and ordered entity list; unknown ids still render (as "—") so a
-// temporarily-unavailable entity does not silently shift the layout. Pages
-// without any entity are dropped. Right now a page can hold up to maxRows
-// rows; the glasses scroll within a page when there are more than fit.
+// Reads an entity entry, which may be a legacy bare id ("light.salon") or the
+// current { id, name } object. `name` is the user-chosen display label and
+// overrides the entity's friendly_name when present.
+export function entityEntry(entry) {
+  if (typeof entry === 'string') return { id: entry.trim(), name: '' };
+  if (entry && typeof entry === 'object') {
+    return {
+      id: String(entry.id || '').trim(),
+      name: typeof entry.name === 'string' ? entry.name : '',
+    };
+  }
+  return { id: '', name: '' };
+}
+
+// Maps the user-defined cards (pages) to the wire format. Each card keeps its
+// own title and ordered entity list; unknown ids still render (as "—") so a
+// temporarily-unavailable entity does not silently shift the layout. Cards
+// without any entity are dropped. Right now a card can hold up to maxRows
+// rows; the glasses scroll within a card when there are more than fit.
 export function buildPages(pages, statesById, { maxRows = 32 } = {}) {
   const out = [];
   for (const page of pages || []) {
-    const entityIds = (page.entities || []).map((id) => String(id || '').trim()).filter(Boolean);
-    if (entityIds.length === 0) continue;
+    const entries = (page.entities || []).map(entityEntry).filter((e) => e.id);
+    if (entries.length === 0) continue;
     const rows = [];
-    for (const id of entityIds.slice(0, maxRows)) {
-      const state = statesById.get(id);
-      rows.push({ label: entityLabel(state, id), value: entityValue(state), action: id });
+    for (const entry of entries.slice(0, maxRows)) {
+      const state = statesById.get(entry.id);
+      const label = entry.name && entry.name.trim() ? entry.name.trim() : entityLabel(state, entry.id);
+      rows.push({ label, value: entityValue(state), action: entry.id });
     }
     const index = out.length;
-    const title = page.title || `Page ${index + 1}`;
+    const title = page.title || `Card ${index + 1}`;
     out.push({ title, rows });
   }
   return out;

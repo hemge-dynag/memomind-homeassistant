@@ -9,42 +9,52 @@ import {
   encodeSetPages,
 } from './protocol.js';
 import { detectLocale, getStrings, format } from './translations.js';
-import { buildPages, callAction, fetchAllEntities, fetchStates, testConnection } from './ha.js';
+import {
+  buildPages,
+  callAction,
+  entityEntry,
+  fetchAllEntities,
+  fetchStates,
+  testConnection,
+} from './ha.js';
 
 const S = getStrings(detectLocale());
 
 const STORAGE_KEY = 'config';
+const DEFAULT_REFRESH_MINUTES = 10;
 
 const gm = createGMPlugin();
 
 const els = {
+  // header
+  title: document.querySelector('#app-title'),
+  settingsButton: document.querySelector('#settings-button'),
+  // main screen
+  mainScreen: document.querySelector('#main-screen'),
+  status: document.querySelector('#status'),
+  syncButton: document.querySelector('#sync-button'),
+  cardsTitle: document.querySelector('#cards-title'),
+  cardsHint: document.querySelector('#cards-hint'),
+  cardsList: document.querySelector('#cards-list'),
+  addCardButton: document.querySelector('#add-card-button'),
+  glassesHint: document.querySelector('#glasses-hint'),
+  // settings screen
+  settingsScreen: document.querySelector('#settings-screen'),
+  settingsTitle: document.querySelector('#settings-title'),
+  settingsHint: document.querySelector('#settings-hint'),
+  backButton: document.querySelector('#back-button'),
+  form: document.querySelector('#config-form'),
   url: document.querySelector('#ha-url'),
   token: document.querySelector('#ha-token'),
   autoRefresh: document.querySelector('#ha-autorefresh'),
-  form: document.querySelector('#config-form'),
-  testButton: document.querySelector('#test-button'),
-  loadButton: document.querySelector('#load-button'),
-  syncButton: document.querySelector('#sync-button'),
-  saveButton: document.querySelector('#save-button'),
-  status: document.querySelector('#status'),
-  title: document.querySelector('#app-title'),
   urlLabel: document.querySelector('#url-label'),
   tokenLabel: document.querySelector('#token-label'),
   tokenHint: document.querySelector('#token-hint'),
   autoRefreshLabel: document.querySelector('#autorefresh-label'),
-  glassesHint: document.querySelector('#glasses-hint'),
-  picker: document.querySelector('#picker'),
-  searchLabel: document.querySelector('#search-label'),
-  searchInput: document.querySelector('#search-input'),
-  availableTitle: document.querySelector('#available-title'),
-  availableList: document.querySelector('#available-list'),
-  selectedTitle: document.querySelector('#selected-title'),
-  selectedList: document.querySelector('#selected-list'),
-  pagesTitle: document.querySelector('#pages-title'),
-  pagesHint: document.querySelector('#pages-hint'),
-  pagesList: document.querySelector('#pages-list'),
-  addPageButton: document.querySelector('#add-page-button'),
-  pageTemplate: document.querySelector('#page-template'),
+  autoRefreshHint: document.querySelector('#autorefresh-hint'),
+  testButton: document.querySelector('#test-button'),
+  loadButton: document.querySelector('#load-button'),
+  saveSettingsButton: document.querySelector('#save-settings-button'),
 };
 
 let config = emptyConfig();
@@ -52,13 +62,15 @@ let connected = false;
 let autoRefreshTimer = null;
 let allEntities = [];
 let entitiesCache = new Map();
-let activePageIndex = 0;
+const expanded = new Set(); // indexes of open cards
+let editingIndex = -1; // index of the card in edit mode, or -1
+let editSnapshot = null; // JSON snapshot of the card when editing started
 
 function emptyConfig() {
   return {
     url: '',
     token: '',
-    autoRefresh: true,
+    autoRefreshMinutes: DEFAULT_REFRESH_MINUTES,
     pages: [{ title: '', entities: [] }],
   };
 }
@@ -68,32 +80,80 @@ function setStatus(text, state = '') {
   els.status.className = `status ${state}`.trim();
 }
 
-function selectedIds() {
-  const page = config.pages[activePageIndex];
-  return new Set(page ? page.entities : []);
-}
+// --- strings / i18n ---------------------------------------------------------
 
 function applyStrings() {
   document.documentElement.lang = detectLocale();
   els.title.textContent = S.appTitle;
+  els.settingsButton.textContent = S.settingsButton;
+  els.syncButton.textContent = S.syncNow;
+  els.cardsTitle.textContent = S.cardsLabel;
+  els.cardsHint.textContent = S.cardsHint;
+  els.addCardButton.textContent = S.addCard;
+  els.glassesHint.textContent = S.glassesHint;
+  els.settingsTitle.textContent = S.settingsTitle;
+  els.settingsHint.textContent = S.settingsHint;
+  els.backButton.textContent = S.backButton;
   els.urlLabel.textContent = S.urlLabel;
   els.url.placeholder = S.urlPlaceholder;
   els.tokenLabel.textContent = S.tokenLabel;
   els.token.placeholder = S.tokenPlaceholder;
   els.tokenHint.textContent = S.tokenHint;
-  els.saveButton.textContent = S.saveButton;
+  els.autoRefreshLabel.textContent = S.autoRefreshLabel;
+  els.autoRefreshHint.textContent = S.autoRefreshHint;
   els.testButton.textContent = S.testButton;
   els.loadButton.textContent = S.loadEntities;
-  els.syncButton.textContent = S.syncNow;
-  els.searchLabel.textContent = S.searchPlaceholder;
-  els.searchInput.placeholder = S.searchPlaceholder;
-  els.availableTitle.textContent = S.entitiesAvailable;
-  els.selectedTitle.textContent = S.entitiesSelected;
-  els.pagesTitle.textContent = S.pagesLabel;
-  els.pagesHint.textContent = S.pagesHint;
-  els.addPageButton.textContent = S.addPage;
-  els.autoRefreshLabel.textContent = S.autoRefresh;
-  els.glassesHint.textContent = S.glassesHint;
+  els.saveSettingsButton.textContent = S.saveButton;
+}
+
+// --- persistence ------------------------------------------------------------
+
+function normalizeMinutes(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_REFRESH_MINUTES;
+  return Math.min(1440, Math.round(n));
+}
+
+function normalizePage(page) {
+  return {
+    title: typeof page?.title === 'string' ? page.title : '',
+    entities: Array.isArray(page?.entities)
+      ? page.entities.map(entityEntry).filter((e) => e.id)
+      : [],
+  };
+}
+
+async function loadConfig() {
+  const result = await gm.storage.get(STORAGE_KEY);
+  const value = result.value;
+  if (value && typeof value === 'object') {
+    config = {
+      url: value.url || '',
+      token: value.token || '',
+      autoRefreshMinutes: normalizeMinutes(value.autoRefreshMinutes),
+      pages: Array.isArray(value.pages) && value.pages.length
+        ? value.pages.map(normalizePage)
+        : [{ title: '', entities: [] }],
+    };
+  }
+  els.url.value = config.url;
+  els.token.value = config.token;
+  els.autoRefresh.value = String(config.autoRefreshMinutes);
+}
+
+// Reads the settings form into `config` (url, token, refresh delay) and saves.
+async function persistConfig() {
+  config.url = els.url.value.trim();
+  config.token = els.token.value.trim();
+  config.autoRefreshMinutes = normalizeMinutes(els.autoRefresh.value);
+  els.autoRefresh.value = String(config.autoRefreshMinutes);
+  await gm.storage.set(STORAGE_KEY, config);
+}
+
+// Cards are persisted on their own (add/remove/rename/entities), without
+// touching the settings fields.
+async function persistCards() {
+  await gm.storage.set(STORAGE_KEY, config);
 }
 
 function isConnectionReady() {
@@ -105,259 +165,310 @@ function isConfigured() {
   return config.pages.some((p) => p.entities.length > 0);
 }
 
-// --- persistence -----------------------------------------------------------
+// --- entity helpers ---------------------------------------------------------
 
-async function loadConfig() {
-  const result = await gm.storage.get(STORAGE_KEY);
-  const value = result.value;
-  if (value && typeof value === 'object') {
-    config = {
-      url: value.url || '',
-      token: value.token || '',
-      autoRefresh: value.autoRefresh !== false,
-      pages: Array.isArray(value.pages) && value.pages.length
-        ? value.pages.map(normalizePage)
-        : [{ title: '', entities: [] }],
-    };
+function friendlyLabel(id) {
+  const found = allEntities.find((e) => e.id === id);
+  return found ? found.label : id;
+}
+
+// The label shown for an entity entry: its custom name when set, else the
+// friendly name resolved from Home Assistant (or the raw id as a fallback).
+function entryLabel(entry) {
+  return entry.name && entry.name.trim() ? entry.name.trim() : friendlyLabel(entry.id);
+}
+
+function labelForEntity(id) {
+  for (const page of config.pages) {
+    const found = (page.entities || []).find((e) => e.id === id);
+    if (found) return entryLabel(found);
   }
-  els.url.value = config.url;
-  els.token.value = config.token;
-  els.autoRefresh.checked = config.autoRefresh;
+  return friendlyLabel(id);
 }
-
-function normalizePage(page) {
-  return {
-    title: typeof page?.title === 'string' ? page.title : '',
-    entities: Array.isArray(page?.entities)
-      ? page.entities.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
-      : [],
-  };
-}
-
-async function persistConfig() {
-  config.url = els.url.value.trim();
-  config.token = els.token.value.trim();
-  config.autoRefresh = els.autoRefresh.checked;
-  await gm.storage.set(STORAGE_KEY, config);
-}
-
-// --- entity picker ---------------------------------------------------------
 
 function entityMatchesFilter(entity, needle) {
   if (!needle) return true;
   return entity.label.toLowerCase().includes(needle) || entity.id.toLowerCase().includes(needle);
 }
 
-function renderAvailable() {
-  const needle = els.searchInput.value.trim().toLowerCase();
-  const chosen = selectedIds();
-  const items = allEntities.filter((e) => entityMatchesFilter(e, needle));
-  els.availableList.replaceChildren();
+// --- screens ----------------------------------------------------------------
+
+function showMain() {
+  cancelEdit();
+  els.settingsScreen.hidden = true;
+  els.mainScreen.hidden = false;
+  els.settingsButton.hidden = false;
+}
+
+function showSettings() {
+  cancelEdit();
+  els.mainScreen.hidden = true;
+  els.settingsScreen.hidden = false;
+  els.settingsButton.hidden = true;
+}
+
+// --- cards ------------------------------------------------------------------
+
+function renderCards() {
+  els.cardsList.replaceChildren();
+  config.pages.forEach((page, index) => els.cardsList.append(cardNode(page, index)));
+}
+
+function cardNode(page, index) {
+  const isEditing = editingIndex === index;
+  const isOpen = expanded.has(index) || isEditing;
+
+  const article = document.createElement('article');
+  article.className = `card${isOpen ? ' open' : ''}`;
+
+  // Header: click to toggle the card open/closed.
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  const chevron = document.createElement('span');
+  chevron.className = 'card-chevron';
+  chevron.textContent = '▸';
+  const name = document.createElement('span');
+  name.className = 'card-name';
+  name.textContent = page.title && page.title.trim() ? page.title : S.cardTitlePlaceholder;
+  const count = document.createElement('span');
+  count.className = 'card-count';
+  count.textContent = String(page.entities.length);
+  head.append(chevron, name, count);
+  head.addEventListener('click', () => {
+    if (editingIndex === index) return;
+    if (expanded.has(index)) expanded.delete(index);
+    else expanded.add(index);
+    renderCards();
+  });
+  article.append(head);
+
+  if (!isOpen) return article;
+
+  const body = document.createElement('div');
+  body.className = 'card-body';
+
+  if (isEditing) {
+    renderCardEditor(body, page, index);
+  } else {
+    renderCardView(body, page, index);
+  }
+  article.append(body);
+  return article;
+}
+
+function renderCardView(body, page, index) {
+  const list = document.createElement('ul');
+  list.className = 'entity-rows';
+  if (page.entities.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'card-empty';
+    empty.textContent = S.noEntities;
+    body.append(empty);
+  } else {
+    for (const entry of page.entities) {
+      const li = document.createElement('li');
+      const info = document.createElement('span');
+      info.className = 'ent-info';
+      const nm = document.createElement('span');
+      nm.className = 'ent-name';
+      nm.textContent = entryLabel(entry);
+      const id = document.createElement('span');
+      id.className = 'ent-id';
+      id.textContent = entry.id;
+      info.append(nm, id);
+      li.append(info);
+      list.append(li);
+    }
+    body.append(list);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
+  const editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.className = 'small';
+  editBtn.textContent = S.editCard;
+  editBtn.addEventListener('click', () => startEdit(index));
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'small danger';
+  delBtn.textContent = S.deleteCard;
+  delBtn.addEventListener('click', () => deleteCard(index));
+  actions.append(editBtn, delBtn);
+  body.append(actions);
+}
+
+function renderCardEditor(body, page, index) {
+  // Title
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.className = 'card-title-input';
+  titleInput.maxLength = 32;
+  titleInput.placeholder = S.cardTitlePlaceholder;
+  titleInput.value = page.title;
+  titleInput.addEventListener('input', () => { page.title = titleInput.value; });
+  body.append(titleInput);
+
+  // Selected entities: each row can be renamed or removed.
+  if (page.entities.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'card-empty';
+    empty.textContent = S.noEntities;
+    body.append(empty);
+  } else {
+    const list = document.createElement('ul');
+    list.className = 'entity-rows';
+    page.entities.forEach((entry, entIndex) => {
+      const li = document.createElement('li');
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.maxLength = 32;
+      nameInput.placeholder = entryLabel(entry);
+      nameInput.value = entry.name || '';
+      nameInput.addEventListener('input', () => { entry.name = nameInput.value; });
+      const id = document.createElement('span');
+      id.className = 'row-id';
+      id.textContent = entry.id;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'remove';
+      remove.textContent = S.removeEntity;
+      remove.addEventListener('click', () => {
+        page.entities.splice(entIndex, 1);
+        renderCards();
+      });
+      li.append(nameInput, id, remove);
+      list.append(li);
+    });
+    body.append(list);
+  }
+
+  // Add-entity box: search + available entity list.
+  const addBox = document.createElement('div');
+  addBox.className = 'add-box';
+  const addTitle = document.createElement('h3');
+  addTitle.className = 'column-title';
+  addTitle.textContent = S.addEntity;
+  addBox.append(addTitle);
 
   if (allEntities.length === 0) {
-    els.availableList.append(emptyItem(S.noEntities));
-    return;
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = S.loadFirst;
+    addBox.append(hint);
+  } else {
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.autocomplete = 'off';
+    search.spellcheck = false;
+    search.placeholder = S.searchPlaceholder;
+    const list = document.createElement('ul');
+    list.className = 'available-list';
+
+    const refreshAvailable = () => {
+      const needle = search.value.trim().toLowerCase();
+      const chosen = new Set(page.entities.map((e) => e.id));
+      list.replaceChildren();
+      const items = allEntities.filter(
+        (e) => !chosen.has(e.id) && entityMatchesFilter(e, needle));
+      if (items.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = S.noAvailableEntities;
+        list.append(li);
+        return;
+      }
+      for (const entity of items) {
+        const li = document.createElement('li');
+        const info = document.createElement('span');
+        info.className = 'ent-info';
+        const nm = document.createElement('span');
+        nm.className = 'ent-name';
+        nm.textContent = entity.label;
+        const id = document.createElement('span');
+        id.className = 'ent-id';
+        id.textContent = entity.id;
+        info.append(nm, id);
+        const plus = document.createElement('span');
+        plus.className = 'add-plus';
+        plus.textContent = '+';
+        li.append(info, plus);
+        li.addEventListener('click', () => {
+          page.entities.push({ id: entity.id, name: '' });
+          renderCards();
+        });
+        list.append(li);
+      }
+    };
+
+    search.addEventListener('input', refreshAvailable);
+    addBox.append(search, list);
+    refreshAvailable();
   }
-  if (items.length === 0) {
-    els.availableList.append(emptyItem(S.noEntities));
-    return;
+  body.append(addBox);
+
+  // Save / cancel
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'small';
+  saveBtn.textContent = S.saveButton;
+  saveBtn.addEventListener('click', () => void saveEdit(index));
+  const cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.className = 'small ghost';
+  cancelBtn.textContent = S.cancelEdit;
+  cancelBtn.addEventListener('click', cancelEdit);
+  actions.append(saveBtn, cancelBtn);
+  body.append(actions);
+}
+
+function startEdit(index) {
+  editingIndex = index;
+  editSnapshot = JSON.stringify(config.pages[index]);
+  renderCards();
+}
+
+function cancelEdit() {
+  if (editingIndex >= 0 && editSnapshot !== null) {
+    config.pages[editingIndex] = JSON.parse(editSnapshot);
   }
-
-  for (const entity of items) {
-    els.availableList.append(availableRow(entity, chosen.has(entity.id)));
-  }
+  editingIndex = -1;
+  editSnapshot = null;
+  renderCards();
 }
 
-function availableRow(entity, checked) {
-  const li = document.createElement('li');
-  const box = document.createElement('input');
-  box.type = 'checkbox';
-  box.checked = checked;
-  box.addEventListener('change', () => toggleEntity(entity.id, box.checked));
-
-  const main = document.createElement('label');
-  main.className = 'ent-main';
-  const name = document.createElement('span');
-  name.className = 'ent-name';
-  name.textContent = entity.label;
-  const id = document.createElement('span');
-  id.className = 'ent-id';
-  id.textContent = entity.id;
-  main.append(name, id);
-
-  li.append(box, main);
-  li.addEventListener('click', (event) => {
-    if (event.target === box) return;
-    box.checked = !box.checked;
-    toggleEntity(entity.id, box.checked);
-  });
-  return li;
+async function saveEdit(index) {
+  editingIndex = -1;
+  editSnapshot = null;
+  await persistCards();
+  setStatus(S.statusSaved, 'ready');
+  renderCards();
+  if (isConfigured() && connected) await syncPages();
 }
 
-function emptyItem(text) {
-  const li = document.createElement('li');
-  li.className = 'empty';
-  li.textContent = text;
-  return li;
-}
-
-function labelForEntity(id) {
-  const found = allEntities.find((e) => e.id === id);
-  return found ? found.label : id;
-}
-
-function renderSelected() {
-  const page = config.pages[activePageIndex];
-  els.selectedList.replaceChildren();
-  if (!page || page.entities.length === 0) {
-    els.selectedList.append(emptyItem(S.noEntities));
-    return;
-  }
-  page.entities.forEach((id, index) => {
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.className = 'ent-name';
-    name.textContent = labelForEntity(id);
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'remove';
-    remove.textContent = S.removeEntity;
-    remove.addEventListener('click', () => removeEntityFromPage(index));
-    li.append(name, remove);
-    els.selectedList.append(li);
-  });
-}
-
-function toggleEntity(id, checked) {
-  const page = config.pages[activePageIndex];
-  if (!page) return;
-  const at = page.entities.indexOf(id);
-  if (checked && at < 0) page.entities.push(id);
-  if (!checked && at >= 0) page.entities.splice(at, 1);
-  renderSelected();
-  renderPages();
-}
-
-function removeEntityFromPage(index) {
-  const page = config.pages[activePageIndex];
-  if (!page) return;
-  page.entities.splice(index, 1);
-  renderAvailable();
-  renderSelected();
-  renderPages();
-}
-
-async function onLoadEntities() {
-  await persistConfig();
-  if (!isConnectionReady()) {
-    setStatus(S.noConnection, 'error');
-    return;
-  }
-  try {
-    setStatus(S.statusLoadingEntities);
-    allEntities = await fetchAllEntities(config.url, config.token);
-    entitiesCache = new Map();
-    els.picker.hidden = false;
-    renderAvailable();
-    renderSelected();
-    setStatus(format(S.statusEntitiesLoaded, { n: allEntities.length }), 'ready');
-  } catch (error) {
-    setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
-  }
-}
-
-// --- pages -----------------------------------------------------------------
-
-function renderPages() {
-  els.pagesList.replaceChildren();
-  config.pages.forEach((page, index) => {
-    els.pagesList.append(pageCard(page, index));
-  });
-}
-
-function pageCard(page, index) {
-  const node = els.pageTemplate.content.firstElementChild.cloneNode(true);
-  node.classList.toggle('active', index === activePageIndex);
-
-  const titleInput = node.querySelector('[data-role="title"]');
-  titleInput.value = page.title;
-  titleInput.placeholder = S.pageTitlePlaceholder;
-  titleInput.addEventListener('input', () => {
-    page.title = titleInput.value;
-    activePageIndex = index;
-  });
-  titleInput.addEventListener('focus', () => setActivePage(index));
-
-  node.querySelector('[data-role="delete"]').textContent = S.deletePage;
-  node.querySelector('[data-role="delete"]').addEventListener('click', (event) => {
-    event.stopPropagation();
-    deletePage(index);
-  });
-
-  const list = node.querySelector('[data-role="entities"]');
-  page.entities.forEach((id, entIndex) => {
-    const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.textContent = labelForEntity(id);
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'remove';
-    remove.textContent = S.removeEntity;
-    remove.addEventListener('click', (event) => {
-      event.stopPropagation();
-      setActivePage(index);
-      page.entities.splice(entIndex, 1);
-      renderAll();
-    });
-    li.append(name, remove);
-    list.append(li);
-  });
-
-  const empty = node.querySelector('[data-role="empty"]');
-  empty.textContent = S.noEntities;
-  empty.hidden = page.entities.length > 0;
-
-  node.addEventListener('click', () => setActivePage(index));
-  return node;
-}
-
-function setActivePage(index) {
-  if (index === activePageIndex) return;
-  activePageIndex = index;
-  renderAvailable();
-  renderSelected();
-  renderPages();
-}
-
-function addPage() {
+function addCard() {
   if (config.pages.length >= MAX_PAGES) return;
   config.pages.push({ title: '', entities: [] });
-  activePageIndex = config.pages.length - 1;
-  renderPages();
-  renderSelected();
-  renderAvailable();
+  expanded.add(config.pages.length - 1);
+  void persistCards();
+  renderCards();
 }
 
-function deletePage(index) {
+function deleteCard(index) {
+  expanded.delete(index);
+  editingIndex = -1;
   if (config.pages.length <= 1) {
     config.pages[0] = { title: '', entities: [] };
-    activePageIndex = 0;
   } else {
     config.pages.splice(index, 1);
-    if (activePageIndex >= config.pages.length) activePageIndex = config.pages.length - 1;
   }
-  renderPages();
-  renderSelected();
-  renderAvailable();
+  void persistCards();
+  renderCards();
 }
 
-function renderAll() {
-  renderPages();
-  renderSelected();
-  renderAvailable();
-}
-
-// --- sync to glasses -------------------------------------------------------
+// --- sync to glasses --------------------------------------------------------
 
 async function syncPages() {
   if (!isConfigured()) {
@@ -390,7 +501,7 @@ async function pushToGlasses(pages) {
   setStatus(format(S.statusPushed, { n: pages.length, titles }), 'ready');
 }
 
-// --- events ----------------------------------------------------------------
+// --- events -----------------------------------------------------------------
 
 async function onTest() {
   await persistConfig();
@@ -407,10 +518,29 @@ async function onTest() {
   }
 }
 
-async function onSave() {
+async function onSaveSettings() {
   await persistConfig();
   setStatus(S.statusSaved, 'ready');
+  scheduleAutoRefresh();
   if (isConfigured() && connected) await syncPages();
+}
+
+async function onLoadEntities() {
+  await persistConfig();
+  if (!isConnectionReady()) {
+    setStatus(S.noConnection, 'error');
+    return;
+  }
+  try {
+    setStatus(S.statusLoadingEntities);
+    allEntities = await fetchAllEntities(config.url, config.token);
+    entitiesCache = new Map();
+    setStatus(format(S.statusEntitiesLoaded, { n: allEntities.length }), 'ready');
+    // Re-render so an open editor picks up the freshly loaded entities.
+    renderCards();
+  } catch (error) {
+    setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
+  }
 }
 
 function scheduleAutoRefresh() {
@@ -418,22 +548,23 @@ function scheduleAutoRefresh() {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
   }
-  if (els.autoRefresh.checked && connected && isConfigured()) {
-    autoRefreshTimer = setInterval(() => void syncPages(), 60000);
+  const ms = normalizeMinutes(config.autoRefreshMinutes) * 60000;
+  if (connected && isConfigured()) {
+    autoRefreshTimer = setInterval(() => void syncPages(), ms);
   }
 }
 
 els.form.addEventListener('submit', (event) => {
   event.preventDefault();
-  void onSave();
+  void onSaveSettings();
 });
 
+els.settingsButton.addEventListener('click', showSettings);
+els.backButton.addEventListener('click', showMain);
 els.testButton.addEventListener('click', () => void onTest());
 els.loadButton.addEventListener('click', () => void onLoadEntities());
 els.syncButton.addEventListener('click', () => void syncPages());
-els.autoRefresh.addEventListener('change', scheduleAutoRefresh);
-els.searchInput.addEventListener('input', renderAvailable);
-els.addPageButton.addEventListener('click', addPage);
+els.addCardButton.addEventListener('click', addCard);
 
 const offMessages = gm.plugin.onMessage((message) => {
   if (message.channel !== EVENT_CHANNEL) return;
@@ -463,8 +594,8 @@ async function start() {
     await gm.ready();
     await loadConfig();
     applyStrings();
-    renderPages();
-    renderSelected();
+    renderCards();
+    showMain();
     const info = await gm.device.getInfo();
     connected = Boolean(info.connected);
     setStatus(connected ? S.statusConnected : S.statusDisconnected, connected ? 'ready' : 'error');

@@ -5,8 +5,10 @@ Home Assistant** directement sur les lunettes. On change de page en tournant la
 tête à **gauche** ou à **droite**, on déplace une **sélection** sur les lignes en
 levant/baissant la tête, et on **exécute l'action** de la ligne sélectionnée
 (allumer/éteindre une lampe, un interrupteur, lancer une scène…) en appuyant sur
-le **bouton** — le tout sans les mains. Côté téléphone, une **liste d'entités
-avec recherche** permet de composer plusieurs **pages** à la carte.
+le **bouton** — le tout sans les mains. Côté téléphone, une page **Réglages**
+regroupe l'URL, le jeton et le délai d'actualisation, et des **cartes**
+repliables permettent de composer les écrans des lunettes (ajout/retrait
+d'entités et renommage de leur libellé).
 
 ## Architecture
 
@@ -38,19 +40,32 @@ Home Assistant (REST API /api)
 
 ## Configuration (cote telephone)
 
+L'appli a deux ecrans : une **page principale** et une page **Reglages**
+(bouton *Reglages* en haut a droite).
+
+**Page principale** — en haut, l'etat de la connexion aux lunettes et le bouton
+**Synchroniser**, puis la liste des **cartes**. Chaque carte est *repliee par
+defaut* (titre seul) ; on l'ouvre d'un appui sur son en-tete. Une carte ouverte
+affiche ses entites et deux boutons : **Modifier** et **Supprimer**. En mode
+Modifier, on peut changer le **titre** de la carte, **renommer le libelle
+affiche** de chaque entite, **retirer** une entite, **ajouter** une entite
+(recherche + liste), puis **Enregistrer** ou **Annuler**. Chaque carte devient
+un ecran sur les lunettes.
+
+**Reglages** :
+
 1. **URL de Home Assistant** — ex. `http://homeassistant.local:8123`
    (ou une URL HTTPS si vous passez par un reverse proxy / Nabu Casa).
 2. **Jeton d'acces longue duree** — cree dans Home Assistant :
    *profil -> Securite -> Jetons d'acces longue duree*.
-3. **Charger les entites** — recupere toutes les entites de votre instance et
-   les affiche dans une liste **filtrable par recherche**. Cochez celles a
-   afficher : elles sont ajoutees a la **page active**.
-4. **Pages** — **Ajouter une page** pour creer d'autres pages, donnez-leur un
-   titre et repartissez vos entites. Chaque page est independante.
-5. **Actualisation automatique** (toutes les 60 s) en option.
+3. **Delai d'actualisation (minutes)** — **10 par defaut** ; l'appli relit les
+   valeurs de Home Assistant a cet intervalle.
+4. **Charger les entites** — recupere toutes les entites de votre instance ;
+   elles deviennent disponibles a l'ajout dans les cartes.
+5. **Tester la connexion** / **Enregistrer**.
 
-Boutons : **Enregistrer**, **Tester la connexion**, **Charger les entites**,
-**Synchroniser**.
+Le libelle d'une entite sur les lunettes est son **nom personnalise** s'il est
+defini, sinon le `friendly_name` Home Assistant, sinon l'`entity_id`.
 
 ## Navigation sur les lunettes
 
@@ -110,7 +125,7 @@ se rafraichissent automatiquement apres chaque action.
 glass/homeassistant/    # homeassistant.c + manifest.json (GMP lunettes)
 phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.2.0.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.3.0.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -120,7 +135,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.2.0.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.3.0.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous
