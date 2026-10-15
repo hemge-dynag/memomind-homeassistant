@@ -49,7 +49,9 @@ defaut* (titre seul) ; on l'ouvre d'un appui sur son en-tete. Une carte ouverte
 affiche ses entites et deux boutons : **Modifier** et **Supprimer**. En mode
 Modifier, on peut changer le **titre** de la carte, **renommer le libelle
 affiche** de chaque entite, **retirer** une entite, **ajouter** une entite
-(recherche + liste), puis **Enregistrer** ou **Annuler**. Chaque carte devient
+(recherche + liste), puis **Enregistrer** ou **Annuler**. Les cartes se
+**reordonnent par glisser-deposer** (poignee ⠿ a gauche du titre), et les
+entites d'une carte aussi (poignee ⠿ en mode Modifier). Chaque carte devient
 un ecran sur les lunettes.
 
 **Reglages** :
@@ -125,7 +127,7 @@ se rafraichissent automatiquement apres chaque action.
 glass/homeassistant/    # homeassistant.c + manifest.json (GMP lunettes)
 phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.3.0.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.4.0.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -135,7 +137,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.3.0.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.4.0.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous

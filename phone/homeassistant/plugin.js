@@ -62,8 +62,8 @@ let connected = false;
 let autoRefreshTimer = null;
 let allEntities = [];
 let entitiesCache = new Map();
-const expanded = new Set(); // indexes of open cards
-let editingIndex = -1; // index of the card in edit mode, or -1
+const expanded = new Set(); // open cards, keyed by page object
+let editingPage = null; // card currently in edit mode, or null
 let editSnapshot = null; // JSON snapshot of the card when editing started
 
 function emptyConfig() {
@@ -150,8 +150,8 @@ async function persistConfig() {
   await gm.storage.set(STORAGE_KEY, config);
 }
 
-// Cards are persisted on their own (add/remove/rename/entities), without
-// touching the settings fields.
+// Cards are persisted on their own (add/remove/reorder/rename/entities),
+// without touching the settings fields.
 async function persistCards() {
   await gm.storage.set(STORAGE_KEY, config);
 }
@@ -191,6 +191,62 @@ function entityMatchesFilter(entity, needle) {
   return entity.label.toLowerCase().includes(needle) || entity.id.toLowerCase().includes(needle);
 }
 
+// --- drag & drop reordering -------------------------------------------------
+
+let sortState = null;
+
+// Makes the direct children of `container` (those carrying [data-sort-item])
+// reorderable by dragging their `.drag-handle`. `onDrop` runs once the pointer
+// is released. Pointer events are used so it works with both mouse and touch.
+function attachSortable(container, onDrop) {
+  container.addEventListener('pointerdown', (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    const handle = event.target.closest('.drag-handle');
+    if (!handle || !container.contains(handle)) return;
+    const item = handle.closest('[data-sort-item]');
+    if (!item || item.parentElement !== container) return;
+    event.preventDefault();
+    sortState = { container, item, onDrop };
+    item.classList.add('dragging');
+    window.addEventListener('pointermove', onSortMove);
+    window.addEventListener('pointerup', onSortUp);
+    window.addEventListener('pointercancel', onSortUp);
+  });
+}
+
+function onSortMove(event) {
+  if (!sortState) return;
+  const { container, item } = sortState;
+  event.preventDefault();
+  const y = event.clientY;
+  const items = directSortItems(container).filter((i) => i !== item);
+  let before = null;
+  for (const it of items) {
+    const rect = it.getBoundingClientRect();
+    if (y < rect.top + rect.height / 2) { before = it; break; }
+  }
+  if (before) {
+    if (before !== item.nextElementSibling) container.insertBefore(item, before);
+  } else if (container.lastElementChild !== item) {
+    container.appendChild(item);
+  }
+}
+
+function onSortUp() {
+  if (!sortState) return;
+  const { container, item, onDrop } = sortState;
+  item.classList.remove('dragging');
+  window.removeEventListener('pointermove', onSortMove);
+  window.removeEventListener('pointerup', onSortUp);
+  window.removeEventListener('pointercancel', onSortUp);
+  sortState = null;
+  onDrop(container);
+}
+
+function directSortItems(container) {
+  return [...container.children].filter((el) => el.hasAttribute('data-sort-item'));
+}
+
 // --- screens ----------------------------------------------------------------
 
 function showMain() {
@@ -211,19 +267,26 @@ function showSettings() {
 
 function renderCards() {
   els.cardsList.replaceChildren();
-  config.pages.forEach((page, index) => els.cardsList.append(cardNode(page, index)));
+  config.pages.forEach((page) => els.cardsList.append(cardNode(page)));
 }
 
-function cardNode(page, index) {
-  const isEditing = editingIndex === index;
-  const isOpen = expanded.has(index) || isEditing;
+function cardNode(page) {
+  const isEditing = editingPage === page;
+  const isOpen = expanded.has(page) || isEditing;
 
   const article = document.createElement('article');
   article.className = `card${isOpen ? ' open' : ''}`;
+  article.setAttribute('data-sort-item', '');
+  article._page = page;
 
-  // Header: click to toggle the card open/closed.
+  // Header: a drag handle, then click anywhere else to toggle open/closed.
   const head = document.createElement('div');
   head.className = 'card-head';
+  const grip = document.createElement('span');
+  grip.className = 'drag-handle';
+  grip.textContent = '⠿';
+  grip.title = S.cardsLabel;
+  grip.addEventListener('click', (event) => event.stopPropagation());
   const chevron = document.createElement('span');
   chevron.className = 'card-chevron';
   chevron.textContent = '▸';
@@ -233,11 +296,11 @@ function cardNode(page, index) {
   const count = document.createElement('span');
   count.className = 'card-count';
   count.textContent = String(page.entities.length);
-  head.append(chevron, name, count);
+  head.append(grip, chevron, name, count);
   head.addEventListener('click', () => {
-    if (editingIndex === index) return;
-    if (expanded.has(index)) expanded.delete(index);
-    else expanded.add(index);
+    if (editingPage === page) return;
+    if (expanded.has(page)) expanded.delete(page);
+    else expanded.add(page);
     renderCards();
   });
   article.append(head);
@@ -246,25 +309,24 @@ function cardNode(page, index) {
 
   const body = document.createElement('div');
   body.className = 'card-body';
-
   if (isEditing) {
-    renderCardEditor(body, page, index);
+    renderCardEditor(body, page);
   } else {
-    renderCardView(body, page, index);
+    renderCardView(body, page);
   }
   article.append(body);
   return article;
 }
 
-function renderCardView(body, page, index) {
-  const list = document.createElement('ul');
-  list.className = 'entity-rows';
+function renderCardView(body, page) {
   if (page.entities.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'card-empty';
     empty.textContent = S.noEntities;
     body.append(empty);
   } else {
+    const list = document.createElement('ul');
+    list.className = 'entity-rows';
     for (const entry of page.entities) {
       const li = document.createElement('li');
       const info = document.createElement('span');
@@ -288,17 +350,17 @@ function renderCardView(body, page, index) {
   editBtn.type = 'button';
   editBtn.className = 'small';
   editBtn.textContent = S.editCard;
-  editBtn.addEventListener('click', () => startEdit(index));
+  editBtn.addEventListener('click', () => startEdit(page));
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
   delBtn.className = 'small danger';
   delBtn.textContent = S.deleteCard;
-  delBtn.addEventListener('click', () => deleteCard(index));
+  delBtn.addEventListener('click', () => deleteCard(page));
   actions.append(editBtn, delBtn);
   body.append(actions);
 }
 
-function renderCardEditor(body, page, index) {
+function renderCardEditor(body, page) {
   // Title
   const titleInput = document.createElement('input');
   titleInput.type = 'text';
@@ -309,7 +371,7 @@ function renderCardEditor(body, page, index) {
   titleInput.addEventListener('input', () => { page.title = titleInput.value; });
   body.append(titleInput);
 
-  // Selected entities: each row can be renamed or removed.
+  // Selected entities: drag to reorder, rename, or remove.
   if (page.entities.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'card-empty';
@@ -320,6 +382,12 @@ function renderCardEditor(body, page, index) {
     list.className = 'entity-rows';
     page.entities.forEach((entry, entIndex) => {
       const li = document.createElement('li');
+      li.setAttribute('data-sort-item', '');
+      li._entry = entry;
+      const grip = document.createElement('span');
+      grip.className = 'drag-handle';
+      grip.textContent = '⠿';
+      grip.addEventListener('click', (event) => event.stopPropagation());
       const nameInput = document.createElement('input');
       nameInput.type = 'text';
       nameInput.maxLength = 32;
@@ -337,10 +405,13 @@ function renderCardEditor(body, page, index) {
         page.entities.splice(entIndex, 1);
         renderCards();
       });
-      li.append(nameInput, id, remove);
+      li.append(grip, nameInput, id, remove);
       list.append(li);
     });
     body.append(list);
+    attachSortable(list, (container) => {
+      page.entities = directSortItems(container).map((el) => el._entry);
+    });
   }
 
   // Add-entity box: search + available entity list.
@@ -414,7 +485,7 @@ function renderCardEditor(body, page, index) {
   saveBtn.type = 'button';
   saveBtn.className = 'small';
   saveBtn.textContent = S.saveButton;
-  saveBtn.addEventListener('click', () => void saveEdit(index));
+  saveBtn.addEventListener('click', () => void saveEdit());
   const cancelBtn = document.createElement('button');
   cancelBtn.type = 'button';
   cancelBtn.className = 'small ghost';
@@ -424,23 +495,23 @@ function renderCardEditor(body, page, index) {
   body.append(actions);
 }
 
-function startEdit(index) {
-  editingIndex = index;
-  editSnapshot = JSON.stringify(config.pages[index]);
+function startEdit(page) {
+  editingPage = page;
+  editSnapshot = JSON.stringify(page);
   renderCards();
 }
 
 function cancelEdit() {
-  if (editingIndex >= 0 && editSnapshot !== null) {
-    config.pages[editingIndex] = JSON.parse(editSnapshot);
+  if (editingPage && editSnapshot !== null) {
+    Object.assign(editingPage, JSON.parse(editSnapshot));
   }
-  editingIndex = -1;
+  editingPage = null;
   editSnapshot = null;
   renderCards();
 }
 
-async function saveEdit(index) {
-  editingIndex = -1;
+async function saveEdit() {
+  editingPage = null;
   editSnapshot = null;
   await persistCards();
   setStatus(S.statusSaved, 'ready');
@@ -450,19 +521,26 @@ async function saveEdit(index) {
 
 function addCard() {
   if (config.pages.length >= MAX_PAGES) return;
-  config.pages.push({ title: '', entities: [] });
-  expanded.add(config.pages.length - 1);
+  const page = { title: '', entities: [] };
+  config.pages.push(page);
+  expanded.add(page);
   void persistCards();
   renderCards();
 }
 
-function deleteCard(index) {
-  expanded.delete(index);
-  editingIndex = -1;
+function deleteCard(page) {
+  expanded.delete(page);
+  if (editingPage === page) {
+    editingPage = null;
+    editSnapshot = null;
+  }
   if (config.pages.length <= 1) {
-    config.pages[0] = { title: '', entities: [] };
+    const fresh = { title: '', entities: [] };
+    config.pages[0] = fresh;
+    expanded.clear();
   } else {
-    config.pages.splice(index, 1);
+    const at = config.pages.indexOf(page);
+    if (at >= 0) config.pages.splice(at, 1);
   }
   void persistCards();
   renderCards();
@@ -565,6 +643,12 @@ els.testButton.addEventListener('click', () => void onTest());
 els.loadButton.addEventListener('click', () => void onLoadEntities());
 els.syncButton.addEventListener('click', () => void syncPages());
 els.addCardButton.addEventListener('click', addCard);
+
+// Reordering the cards rewrites config.pages from the new DOM order.
+attachSortable(els.cardsList, (container) => {
+  config.pages = directSortItems(container).map((el) => el._page);
+  void persistCards();
+});
 
 const offMessages = gm.plugin.onMessage((message) => {
   if (message.channel !== EVENT_CHANNEL) return;

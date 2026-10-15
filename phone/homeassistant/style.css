@@ -168,6 +168,23 @@ button.ghost {
   user-select: none;
 }
 
+.drag-handle {
+  flex: none;
+  width: 1.4rem;
+  text-align: center;
+  color: #6b7280;
+  cursor: grab;
+  touch-action: none;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.drag-handle:active { cursor: grabbing; }
+
+[data-sort-item].dragging {
+  opacity: 0.55;
+}
+
 .card-head .card-chevron {
   flex: none;
   width: 1rem;
