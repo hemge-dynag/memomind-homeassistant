@@ -405,6 +405,9 @@ static gm_plugin_result_t homeassistant_start(void *context)
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0x38));
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_RADIUS, number(6));
+        /* No outline around the highlight: only a flat filled bar. */
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
         ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
 
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
