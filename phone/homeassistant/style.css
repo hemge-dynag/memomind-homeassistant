@@ -250,6 +250,16 @@ button.ghost {
   flex: 1;
 }
 
+.entity-rows .ent-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.entity-rows .ent-edit input[type="text"] { width: 100%; }
+
 .entity-rows .ent-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -315,11 +325,22 @@ button.remove {
 
 .add-box .field { margin-bottom: 8px; }
 
+.add-search {
+  font: inherit;
+  width: 100%;
+  background: #151a24;
+  color: inherit;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+}
+
 .available-list {
   list-style: none;
-  margin: 8px 0 0;
+  margin: 0;
   padding: 0;
-  max-height: 240px;
+  max-height: 220px;
   overflow-y: auto;
   border: 1px solid #2a2f3a;
   border-radius: 8px;

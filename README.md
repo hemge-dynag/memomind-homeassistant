@@ -127,7 +127,7 @@ se rafraichissent automatiquement apres chaque action.
 glass/homeassistant/    # homeassistant.c + manifest.json (GMP lunettes)
 phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.4.0.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.4.1.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -137,7 +137,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.4.0.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.4.1.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous

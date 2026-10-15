@@ -371,48 +371,10 @@ function renderCardEditor(body, page) {
   titleInput.addEventListener('input', () => { page.title = titleInput.value; });
   body.append(titleInput);
 
-  // Selected entities: drag to reorder, rename, or remove.
-  if (page.entities.length === 0) {
-    const empty = document.createElement('p');
-    empty.className = 'card-empty';
-    empty.textContent = S.noEntities;
-    body.append(empty);
-  } else {
-    const list = document.createElement('ul');
-    list.className = 'entity-rows';
-    page.entities.forEach((entry, entIndex) => {
-      const li = document.createElement('li');
-      li.setAttribute('data-sort-item', '');
-      li._entry = entry;
-      const grip = document.createElement('span');
-      grip.className = 'drag-handle';
-      grip.textContent = '⠿';
-      grip.addEventListener('click', (event) => event.stopPropagation());
-      const nameInput = document.createElement('input');
-      nameInput.type = 'text';
-      nameInput.maxLength = 32;
-      nameInput.placeholder = entryLabel(entry);
-      nameInput.value = entry.name || '';
-      nameInput.addEventListener('input', () => { entry.name = nameInput.value; });
-      const id = document.createElement('span');
-      id.className = 'row-id';
-      id.textContent = entry.id;
-      const remove = document.createElement('button');
-      remove.type = 'button';
-      remove.className = 'remove';
-      remove.textContent = S.removeEntity;
-      remove.addEventListener('click', () => {
-        page.entities.splice(entIndex, 1);
-        renderCards();
-      });
-      li.append(grip, nameInput, id, remove);
-      list.append(li);
-    });
-    body.append(list);
-    attachSortable(list, (container) => {
-      page.entities = directSortItems(container).map((el) => el._entry);
-    });
-  }
+  // Selected entities list (kept in place while editing).
+  const selectedList = document.createElement('ul');
+  selectedList.className = 'entity-rows';
+  body.append(selectedList);
 
   // Add-entity box: search + available entity list.
   const addBox = document.createElement('div');
@@ -422,59 +384,23 @@ function renderCardEditor(body, page) {
   addTitle.textContent = S.addEntity;
   addBox.append(addTitle);
 
+  let search = null;
+  let availableList = null;
   if (allEntities.length === 0) {
     const hint = document.createElement('p');
     hint.className = 'hint';
     hint.textContent = S.loadFirst;
     addBox.append(hint);
   } else {
-    const search = document.createElement('input');
+    search = document.createElement('input');
     search.type = 'search';
     search.autocomplete = 'off';
     search.spellcheck = false;
+    search.className = 'add-search';
     search.placeholder = S.searchPlaceholder;
-    const list = document.createElement('ul');
-    list.className = 'available-list';
-
-    const refreshAvailable = () => {
-      const needle = search.value.trim().toLowerCase();
-      const chosen = new Set(page.entities.map((e) => e.id));
-      list.replaceChildren();
-      const items = allEntities.filter(
-        (e) => !chosen.has(e.id) && entityMatchesFilter(e, needle));
-      if (items.length === 0) {
-        const li = document.createElement('li');
-        li.className = 'empty';
-        li.textContent = S.noAvailableEntities;
-        list.append(li);
-        return;
-      }
-      for (const entity of items) {
-        const li = document.createElement('li');
-        const info = document.createElement('span');
-        info.className = 'ent-info';
-        const nm = document.createElement('span');
-        nm.className = 'ent-name';
-        nm.textContent = entity.label;
-        const id = document.createElement('span');
-        id.className = 'ent-id';
-        id.textContent = entity.id;
-        info.append(nm, id);
-        const plus = document.createElement('span');
-        plus.className = 'add-plus';
-        plus.textContent = '+';
-        li.append(info, plus);
-        li.addEventListener('click', () => {
-          page.entities.push({ id: entity.id, name: '' });
-          renderCards();
-        });
-        list.append(li);
-      }
-    };
-
-    search.addEventListener('input', refreshAvailable);
-    addBox.append(search, list);
-    refreshAvailable();
+    availableList = document.createElement('ul');
+    availableList.className = 'available-list';
+    addBox.append(search, availableList);
   }
   body.append(addBox);
 
@@ -493,6 +419,106 @@ function renderCardEditor(body, page) {
   cancelBtn.addEventListener('click', cancelEdit);
   actions.append(saveBtn, cancelBtn);
   body.append(actions);
+
+  // --- live updates --------------------------------------------------------
+  const updateCount = () => {
+    const countEl = body.closest('.card')?.querySelector('.card-count');
+    if (countEl) countEl.textContent = String(page.entities.length);
+  };
+
+  const refreshAvailable = () => {
+    if (!availableList) return;
+    const needle = search.value.trim().toLowerCase();
+    const chosen = new Set(page.entities.map((e) => e.id));
+    availableList.replaceChildren();
+    const items = allEntities.filter(
+      (e) => !chosen.has(e.id) && entityMatchesFilter(e, needle));
+    if (items.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = S.noAvailableEntities;
+      availableList.append(li);
+      return;
+    }
+    for (const entity of items) {
+      const li = document.createElement('li');
+      const info = document.createElement('span');
+      info.className = 'ent-info';
+      const nm = document.createElement('span');
+      nm.className = 'ent-name';
+      nm.textContent = entity.label;
+      const id = document.createElement('span');
+      id.className = 'ent-id';
+      id.textContent = entity.id;
+      info.append(nm, id);
+      const plus = document.createElement('span');
+      plus.className = 'add-plus';
+      plus.textContent = '+';
+      li.append(info, plus);
+      li.addEventListener('click', () => {
+        page.entities.push({ id: entity.id, name: '' });
+        updateCount();
+        refreshSelected();
+        refreshAvailable();
+      });
+      availableList.append(li);
+    }
+  };
+
+  const refreshSelected = () => {
+    selectedList.replaceChildren();
+    if (page.entities.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'card-empty';
+      empty.textContent = S.noEntities;
+      selectedList.append(empty);
+      return;
+    }
+    page.entities.forEach((entry) => {
+      const li = document.createElement('li');
+      li.setAttribute('data-sort-item', '');
+      li._entry = entry;
+      const grip = document.createElement('span');
+      grip.className = 'drag-handle';
+      grip.textContent = '⠿';
+      grip.addEventListener('click', (event) => event.stopPropagation());
+      const field = document.createElement('div');
+      field.className = 'ent-edit';
+      const nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.maxLength = 32;
+      nameInput.placeholder = entryLabel(entry);
+      nameInput.value = entry.name || '';
+      nameInput.addEventListener('input', () => { entry.name = nameInput.value; });
+      const id = document.createElement('span');
+      id.className = 'ent-id';
+      id.textContent = entry.id;
+      field.append(nameInput, id);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'remove';
+      remove.textContent = S.removeEntity;
+      remove.addEventListener('click', () => {
+        const at = page.entities.indexOf(entry);
+        if (at >= 0) page.entities.splice(at, 1);
+        updateCount();
+        refreshSelected();
+        refreshAvailable();
+      });
+      li.append(grip, field, remove);
+      selectedList.append(li);
+    });
+  };
+
+  attachSortable(selectedList, (container) => {
+    page.entities = directSortItems(container).map((el) => el._entry);
+  });
+
+  refreshSelected();
+  if (availableList) {
+    search.addEventListener('input', refreshAvailable);
+    refreshAvailable();
+  }
 }
 
 function startEdit(page) {
