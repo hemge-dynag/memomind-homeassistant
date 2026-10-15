@@ -380,6 +380,8 @@ static gm_plugin_result_t homeassistant_start(void *context)
         font_value.ptr = ha.ui->font_large;
         set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_FONT, font_value);
     }
+    set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_ALIGN,
+              number(GM_PLUGIN_LVGL_TEXT_ALIGN_CENTER));
     ha.ui->obj_set_size(ha.title_label, display.width - SCREEN_MARGIN * 2U,
                          HEADER_HEIGHT);
     ha.ui->obj_align(ha.title_label, GM_PLUGIN_LVGL_ALIGN_TOP_MID, 0, 6);
