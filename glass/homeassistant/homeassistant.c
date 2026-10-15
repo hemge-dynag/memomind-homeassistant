@@ -148,7 +148,7 @@ static void refresh_page(void)
     if (ha.page_count == 0U) {
         ha.ui->label_set_text(ha.title_label,
             L("Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant"));
-        for (slot = 0U; slot < MAX_VISIBLE_ROWS; slot++) {
+        for (slot = 0U; slot < ha.visible_rows; slot++) {
             ha.ui->label_set_text(ha.row_label[slot], "");
             ha.ui->label_set_text(ha.row_value[slot], "");
         }
@@ -285,6 +285,11 @@ static gm_plugin_result_t homeassistant_start(void *context)
     /* Rows fill rows_area_height exactly; anchor them just under the header. */
     rows_area_height = (int32_t)ha.visible_rows * ha.row_height;
 
+    ha.host->log("homeassistant: display %ux%u visible_rows=%u row_height=%d area=%d",
+                  (unsigned int)display.width, (unsigned int)display.height,
+                  (unsigned int)ha.visible_rows, (int)ha.row_height,
+                  (int)rows_area_height);
+
     /* Split the usable width into a label column and a value column with a
      * fixed gap between them. The value gets a fixed share so long numeric
      * readings stay whole; the label takes the rest and truncates. */
@@ -317,30 +322,28 @@ static gm_plugin_result_t homeassistant_start(void *context)
                          HEADER_HEIGHT);
     ha.ui->obj_align(ha.title_label, GM_PLUGIN_LVGL_ALIGN_TOP_MID, 0, 6);
 
-    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
-        int32_t offset_y = HEADER_HEIGHT
-            + SCREEN_MARGIN / 2
-            + (int32_t)row * ha.row_height
-            + ha.row_height / 2;
-        if (offset_y > (int32_t)display.height - HINT_HEIGHT - ha.row_height / 2)
-            break;
-        /* Two fixed columns: label hugs the left margin, value the right margin.
-         * Sizing both from a single split point (instead of centring each with
-         * its own offset) guarantees a long label can never push the value off
-         * the screen; the label clips with "..." via LABEL_DOT. */
+    for (row = 0U; row < ha.visible_rows; row++) {
+        /* Absolute placement via obj_set_pos (top-left in logical pixels) keeps
+         * the rows inside the area below the header without depending on the
+         * alignment point's origin. Two fixed columns: label hugs the left
+         * margin, value the right margin. Sizing both from a single split point
+         * guarantees a long label can never push the value off the screen; the
+         * label clips with "..." via LABEL_DOT. */
+        int32_t top_y = HEADER_HEIGHT + SCREEN_MARGIN / 2
+            + (int32_t)row * ha.row_height;
         ha.row_label[row] = make_label(ha.screen, "", 0xB0, true);
         if (ha.row_label[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
                              ha.row_height - 2);
-        ha.ui->obj_align(ha.row_label[row], GM_PLUGIN_LVGL_ALIGN_LEFT_MID,
-                         SCREEN_MARGIN, offset_y);
+        ha.ui->obj_set_pos(ha.row_label[row], SCREEN_MARGIN, top_y);
 
         ha.row_value[row] = make_label(ha.screen, "", 0xF0, false);
         if (ha.row_value[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_value[row], ha.value_width,
                              ha.row_height - 2);
-        ha.ui->obj_align(ha.row_value[row], GM_PLUGIN_LVGL_ALIGN_RIGHT_MID,
-                         -SCREEN_MARGIN, offset_y);
+        ha.ui->obj_set_pos(ha.row_value[row],
+                           (int32_t)display.width - SCREEN_MARGIN - ha.value_width,
+                           top_y);
     }
 
     ha.hint_label = make_label(ha.screen, "", 0x70, false);
@@ -435,6 +438,10 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
     ha.page_count = p;
     if (ha.page_index >= ha.page_count) ha.page_index = 0U;
     ha.scroll_offset = 0U;
+    ha.host->log("homeassistant: set_pages count=%u page0_rows=%u visible=%u",
+                  (unsigned int)ha.page_count,
+                  (unsigned int)(ha.page_count ? ha_pages[0].row_count : 0U),
+                  (unsigned int)ha.visible_rows);
     refresh_page();
 }
 
@@ -460,6 +467,13 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
 
     if (event->type == GM_PLUGIN_EVENT_IMU_GESTURE &&
         event->data.imu_gesture.active) {
+        ha.host->log("homeassistant: gesture=%u active=%u page=%u rows=%u visible=%u scroll=%u",
+                      (unsigned int)event->data.imu_gesture.gesture,
+                      (unsigned int)event->data.imu_gesture.active,
+                      (unsigned int)ha.page_index,
+                      (unsigned int)(ha.page_count ? ha_pages[ha.page_index].row_count : 0U),
+                      (unsigned int)ha.visible_rows,
+                      (unsigned int)ha.scroll_offset);
         switch (event->data.imu_gesture.gesture) {
         case GM_PLUGIN_IMU_GESTURE_RIGHT:
             change_page(1);
