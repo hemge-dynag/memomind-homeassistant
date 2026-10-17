@@ -10,6 +10,13 @@ import {
 } from './protocol.js';
 import { detectLocale, getStrings, format } from './translations.js';
 import {
+  ICON_NAMES,
+  defaultIconForDomain,
+  iconId,
+  iconNode,
+  isKnownIcon,
+} from './icons.js';
+import {
   buildPages,
   callAction,
   entityEntry,
@@ -178,6 +185,32 @@ function entryLabel(entry) {
   return entry.name && entry.name.trim() ? entry.name.trim() : friendlyLabel(entry.id);
 }
 
+// The icon name an entry shows on the phone: its explicit choice when set,
+// else the entity's own icon attribute, else the default for its domain.
+function entryIconName(entry) {
+  if (entry && isKnownIcon(entry.icon)) return entry.icon;
+  const found = allEntities.find((e) => e.id === entry?.id);
+  if (found && isKnownIcon(found.icon)) return found.icon;
+  return defaultIconForDomain(domainOf(entry?.id));
+}
+
+function domainOf(id) {
+  const dot = String(id || '').indexOf('.');
+  return dot > 0 ? String(id).slice(0, dot) : '';
+}
+
+// Resolves the icon sent to the glasses: a known name -> its table index,
+// otherwise -1 (encoded as "no icon" by the protocol).
+function resolveGlassesIcon(name, entityId) {
+  if (isKnownIcon(name)) return iconId(name);
+  return -1;
+}
+
+// Icon node for an entity, sized for a compact row. Returns null when unknown.
+function entryIconNode(entry, size = 18) {
+  return iconNode(entryIconName(entry), size);
+}
+
 function labelForEntity(id) {
   for (const page of config.pages) {
     const found = (page.entities || []).find((e) => e.id === id);
@@ -331,6 +364,11 @@ function renderCardView(body, page) {
       const li = document.createElement('li');
       const info = document.createElement('span');
       info.className = 'ent-info';
+      const icon = entryIconNode(entry);
+      if (icon) {
+        icon.classList.add('ent-icon');
+        li.append(icon);
+      }
       const nm = document.createElement('span');
       nm.className = 'ent-name';
       nm.textContent = entryLabel(entry);
@@ -444,6 +482,11 @@ function renderCardEditor(body, page) {
       const li = document.createElement('li');
       const info = document.createElement('span');
       info.className = 'ent-info';
+      const icon = iconNode(entity.icon || defaultIconForDomain(entity.domain), 20);
+      if (icon) {
+        icon.classList.add('ent-icon');
+        li.append(icon);
+      }
       const nm = document.createElement('span');
       nm.className = 'ent-name';
       nm.textContent = entity.label;
@@ -456,7 +499,7 @@ function renderCardEditor(body, page) {
       plus.textContent = '+';
       li.append(info, plus);
       li.addEventListener('click', () => {
-        page.entities.push({ id: entity.id, name: '' });
+        page.entities.push({ id: entity.id, name: '', icon: '' });
         updateCount();
         refreshSelected();
         refreshAvailable();
@@ -494,6 +537,27 @@ function renderCardEditor(body, page) {
       id.className = 'ent-id';
       id.textContent = entry.id;
       field.append(nameInput, id);
+
+      // Icon button: current glyph, opens the picker. `entry.icon` holds the
+      // explicit choice; "" means automatic (entity icon, else domain default).
+      const iconBtn = document.createElement('button');
+      iconBtn.type = 'button';
+      iconBtn.className = 'icon-button';
+      iconBtn.title = S.chooseIconTitle;
+      iconBtn.setAttribute('aria-label', S.chooseIconTitle);
+      const paintIconBtn = () => {
+        iconBtn.replaceChildren();
+        const glyph = entryIconNode(entry, 20);
+        if (glyph) iconBtn.append(glyph);
+        iconBtn.classList.toggle('auto', !entry.icon);
+      };
+      paintIconBtn();
+      iconBtn.addEventListener('click', () => {
+        openIconPicker(entry, () => {
+          paintIconBtn();
+          if (editingPage) void persistCards();
+        });
+      });
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'remove';
@@ -505,7 +569,7 @@ function renderCardEditor(body, page) {
         refreshSelected();
         refreshAvailable();
       });
-      li.append(grip, field, remove);
+      li.append(grip, iconBtn, field, remove);
       selectedList.append(li);
     });
   };
@@ -519,6 +583,100 @@ function renderCardEditor(body, page) {
     search.addEventListener('input', refreshAvailable);
     refreshAvailable();
   }
+}
+
+// --- icon picker ------------------------------------------------------------
+
+let iconPicker = null;
+
+// Opens a modal grid of every known icon plus "Automatic". Selecting an icon
+// writes `entry.icon` and refreshes the caller's button. The node is built once
+// (lazily) and reused: the grid is static, only the selected highlight moves.
+function ensureIconPicker() {
+  if (iconPicker) return iconPicker;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'icon-picker-overlay';
+  overlay.hidden = true;
+
+  const dialog = document.createElement('div');
+  dialog.className = 'icon-picker';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+
+  const head = document.createElement('div');
+  head.className = 'icon-picker-head';
+  const heading = document.createElement('h3');
+  heading.textContent = S.chooseIconTitle;
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'ghost small';
+  closeBtn.textContent = S.backButton;
+  head.append(heading, closeBtn);
+
+  const hint = document.createElement('p');
+  hint.className = 'hint';
+  hint.textContent = S.iconHint;
+
+  const grid = document.createElement('div');
+  grid.className = 'icon-grid';
+
+  dialog.append(head, hint, grid);
+  overlay.append(dialog);
+  document.body.append(overlay);
+
+  const close = () => {
+    overlay.hidden = true;
+    iconPicker.current = null;
+  };
+  closeBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) close();
+  });
+
+  iconPicker = { overlay, grid, heading, hint, close, current: null };
+  return iconPicker;
+}
+
+function openIconPicker(entry, onChange) {
+  const picker = ensureIconPicker();
+  picker.heading.textContent = S.chooseIconTitle;
+  picker.hint.textContent = S.iconHint;
+  picker.current = { entry, onChange };
+  picker.grid.replaceChildren();
+
+  const makeCell = (name, label) => {
+    const cell = document.createElement('button');
+    cell.type = 'button';
+    cell.className = 'icon-cell';
+    cell.title = label;
+    cell.setAttribute('aria-label', label);
+    if (name && isKnownIcon(name)) {
+      const glyph = iconNode(name, 24);
+      if (glyph) cell.append(glyph);
+    } else {
+      const auto = document.createElement('span');
+      auto.className = 'icon-auto';
+      auto.textContent = 'A';
+      cell.append(auto);
+    }
+    const selected = name ? entry.icon === name : !entry.icon;
+    if (selected) cell.classList.add('selected');
+    cell.addEventListener('click', () => {
+      entry.icon = name || '';
+      picker.close();
+      onChange();
+    });
+    return cell;
+  };
+
+  picker.grid.append(makeCell('', S.iconAuto));
+
+  for (const name of ICON_NAMES) {
+    picker.grid.append(makeCell(name, name));
+  }
+
+  picker.overlay.hidden = false;
 }
 
 function startEdit(page) {
@@ -582,7 +740,10 @@ async function syncPages() {
   try {
     setStatus(S.statusPushing);
     entitiesCache = await fetchStates(config.url, config.token);
-    const pages = buildPages(config.pages, entitiesCache, { maxRows: MAX_ROWS });
+    const pages = buildPages(config.pages, entitiesCache, {
+      maxRows: MAX_ROWS,
+      resolveIcon: resolveGlassesIcon,
+    });
     await pushToGlasses(pages);
   } catch (error) {
     setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');

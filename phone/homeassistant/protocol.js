@@ -3,7 +3,7 @@
 
 export const PAGES_CHANNEL = 0x4841; // 'HA', phone -> glasses
 export const EVENT_CHANNEL = 0x4853; // 'HS', glasses -> phone
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 export const COMMAND_SET_PAGES = 1;
 export const COMMAND_CLEAR = 2;
@@ -17,6 +17,10 @@ export const MAX_LABEL_BYTES = 32;
 export const MAX_VALUE_BYTES = 24;
 export const MAX_TITLE_BYTES = 32;
 export const MAX_ACTION_BYTES = 48;
+/* Icon rows are addressed by id: an index into the glasses' built-in icon
+ * table (ha_icons.h). 0xFF means "no icon" and is the default for entries the
+ * phone cannot map. Keep the ids aligned with icons.js ICON_NAMES order. */
+export const NO_ICON = 0xff;
 
 const encoder = new TextEncoder();
 
@@ -29,8 +33,9 @@ function clampBytes(text, max) {
 // [version, cmd, page_count(2),
 //   { title_len, title,
 //     row_count(2),
-//     { label_len, label, value_len, value, action_len, action } * row_count } * page_count ]
+//     { icon_id, label_len, label, value_len, value, action_len, action } * row_count } * page_count ]
 // `action` is the entity id the glasses echo back when the row is activated.
+// `icon_id` is the row's icon index in the glasses table (0xFF = none).
 export function encodeSetPages(pages) {
   const list = (pages || []).slice(0, MAX_PAGES);
   const chunks = [];
@@ -42,7 +47,9 @@ export function encodeSetPages(pages) {
       const label = clampBytes(row.label, MAX_LABEL_BYTES);
       const value = clampBytes(row.value, MAX_VALUE_BYTES);
       const action = clampBytes(row.action, MAX_ACTION_BYTES);
-      rowChunks.push(new Uint8Array([label.length]), label,
+      const icon = Number.isInteger(row.icon) && row.icon >= 0 && row.icon < 0xff
+        ? row.icon : NO_ICON;
+      rowChunks.push(new Uint8Array([icon, label.length]), label,
                      new Uint8Array([value.length]), value,
                      new Uint8Array([action.length]), action);
     }

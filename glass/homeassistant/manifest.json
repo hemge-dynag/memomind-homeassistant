@@ -1,11 +1,11 @@
 {
   "id": "com.dynag.homeassistant.glass",
   "name": "GM Home Assistant",
-  "version": 8,
+  "version": 9,
   "abi_version": 256,
   "provides": {
     "protocols": [
-      { "id": "gm.homeassistant", "version": "1.0" },
+      { "id": "gm.homeassistant", "version": "2.0" },
       { "id": "gm.device-events", "version": "1.0" }
     ]
   }

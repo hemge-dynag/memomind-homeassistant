@@ -1,5 +1,6 @@
 #include "gm_plugin_lvgl_api.h"
 #include "gm_plugin_libc.h"
+#include "ha_icons.h"
 
 /* Paired with PhoneSDK/examples/homeassistant. The phone connects to a Home
  * Assistant instance, fetches entities grouped into dashboard pages, and pushes
@@ -16,7 +17,7 @@
 
 #define PAGES_CHANNEL UINT16_C(0x4841)  /* 'HA': phone -> glasses */
 #define EVENT_CHANNEL UINT16_C(0x4853)  /* 'HS': glasses -> phone */
-#define PROTOCOL_VERSION 1U
+#define PROTOCOL_VERSION 2U
 
 #define COMMAND_SET_PAGES 1U
 #define COMMAND_CLEAR 2U
@@ -38,6 +39,9 @@
 #define MAX_VALUE_BYTES 24U
 #define MAX_TITLE_BYTES 32U
 #define MAX_ACTION_BYTES 48U
+/* No icon: the row is drawn without a glyph. Any other value is an index into
+ * ha_icons[] (the phone sends the same order, see PhoneSDK icons.js). */
+#define NO_ICON 0xFFU
 
 /* version(1) + command(1) + page_count(2) */
 #define MIN_SET_PAGES_PAYLOAD 4U
@@ -49,11 +53,17 @@
 #define HEADER_HEIGHT 44
 #define HINT_HEIGHT 28
 #define ROW_MIN_HEIGHT 26
+/* Smallest legible box for a 16x16 glyph. The icon column is only carved out
+ * when a row is tall enough for it; otherwise rows fall back to text-only. */
+#define ICON_CELL 16
+/* Horizontal gap between the icon and the label text. */
+#define ICON_GAP 8
 
 typedef struct {
     char label[MAX_LABEL_BYTES + 1U];
     char value[MAX_VALUE_BYTES + 1U];
     char action[MAX_ACTION_BYTES + 1U];
+    uint8_t icon; /* index into ha_icons[], or NO_ICON */
 } ha_row_t;
 
 typedef struct {
@@ -69,6 +79,7 @@ typedef struct {
     gm_plugin_lvgl_obj_t *screen;
     gm_plugin_lvgl_obj_t *title_label;
     gm_plugin_lvgl_obj_t *row_bg[MAX_VISIBLE_ROWS]; /* selection highlight */
+    gm_plugin_lvgl_obj_t *row_icon[MAX_VISIBLE_ROWS]; /* 16x16 glyph, or 0 */
     gm_plugin_lvgl_obj_t *row_label[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *row_value[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *hint_label;
@@ -79,6 +90,8 @@ typedef struct {
     uint8_t visible_rows;   /* rows that fit on screen */
     int32_t row_height;
     int32_t label_width;    /* label column width (left-aligned) */
+    int32_t label_x;        /* left edge of the label text */
+    uint8_t icon_column;    /* 1 when rows reserve a 16x16 icon slot */
     int32_t value_width;    /* value column width (right-aligned) */
     uint8_t language; /* 0=fr 1=en 2=es 3=it 4=de 5=zh-CN */
 } ha_t;
@@ -149,6 +162,39 @@ static uint16_t read_u16(const uint8_t *data)
     return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
 }
 
+static void hide_row_icon(uint32_t slot);
+
+/* Maps a wire icon id to its descriptor, or 0 when the row carries no icon or
+ * an out-of-range id (e.g. a newer phone sent an icon this build lacks). */
+static const gm_plugin_lvgl_image_dsc_t *row_icon_dsc(uint8_t icon)
+{
+    if (icon >= HA_ICON_COUNT) return 0;
+    return &ha_icons_dsc[icon];
+}
+
+/* Points a row's image object at the glyph for `icon`, hiding it when the row
+ * has none. The descriptor data is the table's static bitmap, borrowed by the
+ * host for as long as the image shows it. */
+static void show_row_icon(uint32_t slot, uint8_t icon)
+{
+    const gm_plugin_lvgl_image_dsc_t *dsc;
+    if (slot >= ha.visible_rows || ha.row_icon[slot] == 0) return;
+    dsc = row_icon_dsc(icon);
+    if (dsc == 0) {
+        hide_row_icon(slot);
+        return;
+    }
+    (void)ha.ui->image_set_source(ha.row_icon[slot], dsc);
+    ha.ui->obj_clear_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+}
+
+/* Empties the icon slot so a text-only row leaves no stale glyph behind. */
+static void hide_row_icon(uint32_t slot)
+{
+    if (slot >= ha.visible_rows || ha.row_icon[slot] == 0) return;
+    ha.ui->obj_add_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+}
+
 /* Renders the current page: title with an "i/n" position marker, the visible
  * slice of label/value rows starting at scroll_offset, and a navigation hint.
  * Rows past the page's row_count are blanked so a shorter page never shows
@@ -164,6 +210,7 @@ static void refresh_page(void)
         for (slot = 0U; slot < ha.visible_rows; slot++) {
             ha.ui->label_set_text(ha.row_label[slot], "");
             ha.ui->label_set_text(ha.row_value[slot], "");
+            if (ha.row_icon[slot] != 0) hide_row_icon(slot);
             set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
         }
         ha.ui->label_set_text(ha.hint_label,
@@ -213,9 +260,11 @@ static void refresh_page(void)
             if (row < page->row_count) {
                 ha.ui->label_set_text(ha.row_label[slot], page->rows[row].label);
                 ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
+                show_row_icon(slot, page->rows[row].icon);
             } else {
                 ha.ui->label_set_text(ha.row_label[slot], "");
                 ha.ui->label_set_text(ha.row_value[slot], "");
+                if (ha.row_icon[slot] != 0) hide_row_icon(slot);
             }
             /* Highlight the selected row; the others keep a transparent
              * background so the highlight follows the cursor. */
@@ -361,6 +410,18 @@ static gm_plugin_result_t homeassistant_start(void *context)
         ha.value_width = usable * 2 / 5;
         ha.label_width = usable - ha.value_width - gap;
         if (ha.label_width < 0) ha.label_width = 0;
+
+        /* ICON_CELL takes the first 16 px of the label column when a row is
+         * tall enough to show a 16x16 glyph; the label then starts after the
+         * glyph plus a small gap. Shorter rows keep the full width and draw
+         * text only (no image objects are created for them). */
+        ha.label_x = SCREEN_MARGIN;
+        ha.icon_column = 0;
+        if (ha.row_height - 2 >= ICON_CELL && ha.label_width > ICON_CELL + ICON_GAP + 16) {
+            ha.icon_column = 1;
+            ha.label_x = SCREEN_MARGIN + ICON_CELL + ICON_GAP;
+            ha.label_width -= ICON_CELL + ICON_GAP;
+        }
     }
 
     root = ha.ui->root_get();
@@ -412,11 +473,24 @@ static gm_plugin_result_t homeassistant_start(void *context)
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
         ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
 
+        /* Glyph slot just inside the left margin, vertically centred. It is
+         * hidden until refresh_page() binds a real icon, so text-only rows
+         * leave no gap or stale glyph. Shares the row's vertical rhythm. */
+        if (ha.icon_column) {
+            const gm_plugin_lvgl_image_dsc_t *placeholder = &ha_icons_dsc[0];
+            ha.row_icon[row] = ha.ui->image_create(ha.screen, placeholder);
+            if (ha.row_icon[row] == 0) goto no_memory;
+            ha.ui->obj_set_pos(ha.row_icon[row], SCREEN_MARGIN,
+                               top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
+            ha.ui->obj_add_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+            ha.ui->obj_clear_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+        }
+
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
         if (ha.row_label[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
                              ha.row_height - 2);
-        ha.ui->obj_set_pos(ha.row_label[row], SCREEN_MARGIN, top_y);
+        ha.ui->obj_set_pos(ha.row_label[row], ha.label_x, top_y);
 
         ha.row_value[row] = make_label(ha.screen, "", 0xF0, false);
         if (ha.row_value[row] == 0) goto no_memory;
@@ -437,6 +511,7 @@ static gm_plugin_result_t homeassistant_start(void *context)
     ha.page_index = 0U;
     ha.scroll_offset = 0U;
     ha.selected = 0U;
+    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) ha.row_icon[row] = 0;
     refresh_page();
 
     if (ha.host->imu_enable(GM_PLUGIN_IMU_ENABLE_GESTURES) != GM_PLUGIN_OK)
@@ -449,6 +524,7 @@ no_memory:
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_bg[row] = 0;
+        ha.row_icon[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -460,7 +536,9 @@ no_memory:
  * [version, cmd, page_count(2),
  *   { title_len, title,
  *     row_count(2),
- *     { label_len, label, value_len, value } * row_count } * page_count ] */
+ *     { icon_id, label_len, label, value_len, value, action_len, action }
+ *       * row_count } * page_count ]
+ * icon_id indexes ha_icons[], or NO_ICON. */
 static void handle_set_pages(const uint8_t *data, uint32_t length)
 {
     uint32_t offset;
@@ -505,6 +583,8 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
             uint8_t label_len;
             uint8_t value_len;
             uint8_t action_len;
+            if (offset + 1U > length) break;
+            page->rows[r].icon = data[offset++];
             if (offset + 1U > length) break;
             label_len = data[offset++];
             if (label_len > MAX_LABEL_BYTES || offset + label_len > length) break;
@@ -608,10 +688,12 @@ static void homeassistant_stop(void *context)
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_bg[row] = 0;
+        ha.row_icon[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
     ha.hint_label = 0;
+    ha.icon_column = 0U;
     ha.page_count = 0U;
     ha.page_index = 0U;
     ha.scroll_offset = 0U;

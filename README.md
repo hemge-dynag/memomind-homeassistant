@@ -110,11 +110,16 @@ se rafraichissent automatiquement apres chaque action.
   page a **32 octets** (decoupage UTF-8 propre).
 - Le nom convivial (`friendly_name`) de l'entite est utilise comme libelle s'il
   existe, sinon l'`entity_id` sans son domaine.
+- Une icone (Material Design Icons, 40 disponibles) est dessinee devant le nom
+  sur les lunettes comme sur le telephone. Le telephone choisit une icone
+  explicite par entite ; sans choix, l'icone `attributes.icon` de Home
+  Assistant est reprise, a defaut une icone par domaine (lumière -> ampoule,
+  prise -> interrupteur, capteur -> thermometre, etc.).
 - Si aucune entite ne se resout, les lunettes reviennent a l'ecran d'attente.
 
 ## Identifiants
 
-- Lunettes : `com.dynag.homeassistant.glass` (protocole `gm.homeassistant` 1.0)
+- Lunettes : `com.dynag.homeassistant.glass` (protocole `gm.homeassistant` 2.0)
 - Telephone : `com.dynag.homeassistant.phone`
 - Canaux de messages : `0x4841` ('HA', telephone -> lunettes),
   `0x4853` ('HS', lunettes -> telephone).
@@ -124,10 +129,10 @@ se rafraichissent automatiquement apres chaque action.
 ## Structure du depot
 
 ```
-glass/homeassistant/    # homeassistant.c + manifest.json (GMP lunettes)
-phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js,
+glass/homeassistant/    # homeassistant.c, ha_icons.h + manifest.json (GMP lunettes)
+phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js, icons.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.4.1.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.5.0.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -137,7 +142,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.4.1.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.5.0.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous

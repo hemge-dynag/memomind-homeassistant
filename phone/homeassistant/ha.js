@@ -98,7 +98,8 @@ export async function fetchStates(baseUrl, token) {
 
 // Fetches every entity as a flat, display-ready list sorted by friendly label,
 // for the searchable picker. Each item carries its domain (the part before the
-// dot) so the UI can group or filter by type.
+// dot) and its icon name (from attributes.icon, e.g. "mdi:lightbulb" ->
+// "lightbulb"), so the UI can group by type and show the matching glyph.
 export async function fetchAllEntities(baseUrl, token) {
   const states = await fetchStates(baseUrl, token);
   const list = [];
@@ -108,6 +109,7 @@ export async function fetchAllEntities(baseUrl, token) {
       id: entityId,
       label: entityLabel(state, entityId),
       domain: dot >= 0 ? entityId.slice(0, dot) : '',
+      icon: entityIconName(state),
     });
   }
   list.sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
@@ -123,6 +125,16 @@ export function entityLabel(state, entityId) {
   return dot >= 0 ? entityId.slice(dot + 1) : entityId;
 }
 
+// Extracts the MDI icon name from an entity's attributes.icon ("mdi:lightbulb"
+// -> "lightbulb"). Returns "" when the entity does not expose one.
+export function entityIconName(state) {
+  const icon = state?.attributes?.icon;
+  if (typeof icon !== 'string') return '';
+  const colon = icon.indexOf(':');
+  const name = colon >= 0 ? icon.slice(colon + 1) : icon;
+  return name.trim();
+}
+
 // Compact value: unit_of_measurement appended when present, otherwise the raw
 // state. Kept short because the glasses row value is limited to 24 bytes.
 export function entityValue(state) {
@@ -134,17 +146,20 @@ export function entityValue(state) {
 }
 
 // Reads an entity entry, which may be a legacy bare id ("light.salon") or the
-// current { id, name } object. `name` is the user-chosen display label and
-// overrides the entity's friendly_name when present.
+// current { id, name, icon } object. `name` is the user-chosen display label
+// and overrides the entity's friendly_name when present. `icon` is the chosen
+// MDI icon name ("" = automatic: the entity's own icon attribute, else a
+// default derived from its domain).
 export function entityEntry(entry) {
-  if (typeof entry === 'string') return { id: entry.trim(), name: '' };
+  if (typeof entry === 'string') return { id: entry.trim(), name: '', icon: '' };
   if (entry && typeof entry === 'object') {
     return {
       id: String(entry.id || '').trim(),
       name: typeof entry.name === 'string' ? entry.name : '',
+      icon: typeof entry.icon === 'string' ? entry.icon : '',
     };
   }
-  return { id: '', name: '' };
+  return { id: '', name: '', icon: '' };
 }
 
 // Maps the user-defined cards (pages) to the wire format. Each card keeps its
@@ -152,7 +167,7 @@ export function entityEntry(entry) {
 // temporarily-unavailable entity does not silently shift the layout. Cards
 // without any entity are dropped. Right now a card can hold up to maxRows
 // rows; the glasses scroll within a card when there are more than fit.
-export function buildPages(pages, statesById, { maxRows = 32 } = {}) {
+export function buildPages(pages, statesById, { maxRows = 32, resolveIcon = null } = {}) {
   const out = [];
   for (const page of pages || []) {
     const entries = (page.entities || []).map(entityEntry).filter((e) => e.id);
@@ -161,7 +176,16 @@ export function buildPages(pages, statesById, { maxRows = 32 } = {}) {
     for (const entry of entries.slice(0, maxRows)) {
       const state = statesById.get(entry.id);
       const label = entry.name && entry.name.trim() ? entry.name.trim() : entityLabel(state, entry.id);
-      rows.push({ label, value: entityValue(state), action: entry.id });
+      // Icon resolution: explicit choice > the entity's own icon attribute >
+      // the domain default. `resolveIcon` is injected by the caller so this
+      // module stays free of the icon tables.
+      const icon = entry.icon || entityIconName(state);
+      rows.push({
+        label,
+        value: entityValue(state),
+        action: entry.id,
+        icon: resolveIcon ? resolveIcon(icon, entry.id) : icon,
+      });
     }
     const index = out.length;
     const title = page.title || `Card ${index + 1}`;
