@@ -14,7 +14,7 @@
   "deviceRequirements": {
     "preferredPluginId": "com.dynag.homeassistant.glass",
     "requiredPluginId": "com.dynag.homeassistant.glass",
-    "minPluginVersion": "9",
+    "minPluginVersion": "10",
     "protocols": [
       { "id": "gm.homeassistant", "minVersion": "2.0" }
     ]

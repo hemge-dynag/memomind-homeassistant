@@ -178,14 +178,26 @@ static const gm_plugin_lvgl_image_dsc_t *row_icon_dsc(uint8_t icon)
 static void show_row_icon(uint32_t slot, uint8_t icon)
 {
     const gm_plugin_lvgl_image_dsc_t *dsc;
+    gm_plugin_result_t result;
     if (slot >= ha.visible_rows || ha.row_icon[slot] == 0) return;
     dsc = row_icon_dsc(icon);
     if (dsc == 0) {
         hide_row_icon(slot);
         return;
     }
-    (void)ha.ui->image_set_source(ha.row_icon[slot], dsc);
+    result = ha.ui->image_set_source(ha.row_icon[slot], dsc);
+    if (result != GM_PLUGIN_OK) {
+        ha.host->log("homeassistant: icon set_source slot=%u id=%u rc=%d",
+                      (unsigned int)slot, (unsigned int)icon, (int)result);
+        return;
+    }
     ha.ui->obj_clear_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+    /* Geometry is taken from the descriptor's bitmap, but some Host build
+     * leaves an image created without an explicit size at zero extent, which
+     * draws nothing. Sizing it here matches the glyph and is harmless when the
+     * Host already derived it. */
+    ha.ui->obj_set_size(ha.row_icon[slot], dsc->width, dsc->height);
+    ha.ui->obj_invalidate(ha.row_icon[slot]);
 }
 
 /* Empties the icon slot so a text-only row leaves no stale glyph behind. */
@@ -422,6 +434,9 @@ static gm_plugin_result_t homeassistant_start(void *context)
             ha.label_x = SCREEN_MARGIN + ICON_CELL + ICON_GAP;
             ha.label_width -= ICON_CELL + ICON_GAP;
         }
+        ha.host->log("homeassistant: icons column=%u label_x=%d label_w=%d value_w=%d",
+                      (unsigned int)ha.icon_column, (int)ha.label_x,
+                      (int)ha.label_width, (int)ha.value_width);
     }
 
     root = ha.ui->root_get();
@@ -459,6 +474,19 @@ static gm_plugin_result_t homeassistant_start(void *context)
         int32_t top_y = HEADER_HEIGHT + SCREEN_MARGIN / 2
             + (int32_t)row * ha.row_height;
 
+        /* The glyph is created before the highlight rectangle: LVGL gives a
+         * child the next sibling index, so this order puts the glyph above the
+         * highlight (an opaque selected row would otherwise paint over it). */
+        if (ha.icon_column) {
+            ha.row_icon[row] = ha.ui->image_create(ha.screen, &ha_icons_dsc[0]);
+            if (ha.row_icon[row] == 0) goto no_memory;
+            ha.ui->obj_set_size(ha.row_icon[row], ICON_CELL, ICON_CELL);
+            ha.ui->obj_set_pos(ha.row_icon[row], SCREEN_MARGIN,
+                               top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
+            ha.ui->obj_add_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+            ha.ui->obj_clear_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+        }
+
         ha.row_bg[row] = ha.ui->obj_create(ha.screen);
         if (ha.row_bg[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_bg[row],
@@ -472,19 +500,6 @@ static gm_plugin_result_t homeassistant_start(void *context)
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
         ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
-
-        /* Glyph slot just inside the left margin, vertically centred. It is
-         * hidden until refresh_page() binds a real icon, so text-only rows
-         * leave no gap or stale glyph. Shares the row's vertical rhythm. */
-        if (ha.icon_column) {
-            const gm_plugin_lvgl_image_dsc_t *placeholder = &ha_icons_dsc[0];
-            ha.row_icon[row] = ha.ui->image_create(ha.screen, placeholder);
-            if (ha.row_icon[row] == 0) goto no_memory;
-            ha.ui->obj_set_pos(ha.row_icon[row], SCREEN_MARGIN,
-                               top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
-            ha.ui->obj_add_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
-            ha.ui->obj_clear_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
-        }
 
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
         if (ha.row_label[row] == 0) goto no_memory;
@@ -616,6 +631,12 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
                   (unsigned int)ha.page_count,
                   (unsigned int)(ha.page_count ? ha_pages[0].row_count : 0U),
                   (unsigned int)ha.visible_rows);
+    /* First icons of page 0: distinguishes "phone sent no icon" (ff) from a
+     * rendering problem with a real id. */
+    for (p = 0U; p < 4U && p < ha_pages[0].row_count; p++)
+        ha.host->log("homeassistant: row%u icon=%u image=%p",
+                      (unsigned int)p, (unsigned int)ha_pages[0].rows[p].icon,
+                      (void *)ha.row_icon[p]);
     refresh_page();
 }
 
@@ -721,9 +742,12 @@ gm_plugin_result_t gm_plugin_entry(const gm_plugin_host_api_t *host,
     ha.ui = host->graphics.lvgl;
     if (gm_plugin_libc_get(host, &ha.libc) != GM_PLUGIN_OK)
         return GM_PLUGIN_ENOTSUP;
-    if (ha.ui->struct_size < GM_PLUGIN_LVGL_API_MIN_SIZE ||
+    /* The row glyphs are static indexed images, so require the 1.1 image
+     * entry points to be present instead of only the older table size. */
+    if (ha.ui->struct_size < GM_PLUGIN_LVGL_API_1_1_SIZE ||
         !GM_PLUGIN_VERSION_COMPATIBLE(ha.ui->api_version,
-                                      GM_PLUGIN_LVGL_API_MIN_VERSION))
+                                      GM_PLUGIN_VERSION(1U, 1U)) ||
+        ha.ui->image_create == 0 || ha.ui->image_set_source == 0)
         return GM_PLUGIN_EVERSION;
 
     plugin->abi_version = GM_PLUGIN_ABI_MIN_VERSION;
