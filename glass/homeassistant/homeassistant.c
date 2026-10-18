@@ -42,6 +42,8 @@
 /* No icon: the row is drawn without a glyph. Any other value is an index into
  * ha_icons[] (the phone sends the same order, see PhoneSDK icons.js). */
 #define NO_ICON 0xFFU
+/* Generic glyph used when a row has no usable icon id (text-box). */
+#define HA_ICON_FALLBACK (HA_ICON_COUNT - 1U)
 
 /* version(1) + command(1) + page_count(2) */
 #define MIN_SET_PAGES_PAYLOAD 4U
@@ -168,7 +170,10 @@ static void hide_row_icon(uint32_t slot);
  * an out-of-range id (e.g. a newer phone sent an icon this build lacks). */
 static const gm_plugin_lvgl_image_dsc_t *row_icon_dsc(uint8_t icon)
 {
-    if (icon >= HA_ICON_COUNT) return 0;
+    /* An unknown id (including NO_ICON) falls back to the generic glyph instead
+     * of leaving the slot empty: a row always shows an icon, so an older phone
+     * that still sends 0xFF for unrecognised icons stays readable. */
+    if (icon >= HA_ICON_COUNT) icon = HA_ICON_FALLBACK;
     return &ha_icons_dsc[icon];
 }
 
@@ -447,26 +452,6 @@ static gm_plugin_result_t homeassistant_start(void *context)
     ha.ui->obj_set_size(ha.screen, display.width, display.height);
     ha.ui->obj_align(ha.screen, GM_PLUGIN_LVGL_ALIGN_CENTER, 0, 0);
     style_panel(ha.screen, 0x00, 0, 0);
-
-    /* TEMP diagnostic probe (v12-test): glyph and plain box at the top-right,
-     * on the screen itself so nothing covers them. */
-    {
-        gm_plugin_lvgl_obj_t *probe_icon = ha.ui->image_create(ha.screen, &ha_icons_dsc[0]);
-        gm_plugin_lvgl_obj_t *probe_box = ha.ui->obj_create(ha.screen);
-        if (probe_icon != 0) {
-            ha.ui->obj_set_pos(probe_icon, (int32_t)display.width - 60, 4);
-            ha.ui->obj_set_size(probe_icon, 16, 16);
-        }
-        if (probe_box != 0) {
-            ha.ui->obj_set_pos(probe_box, (int32_t)display.width - 36, 4);
-            ha.ui->obj_set_size(probe_box, 16, 16);
-            set_style(probe_box, GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0xF0));
-            set_style(probe_box, GM_PLUGIN_LVGL_STYLE_BG_OPA, number(255));
-        }
-        ha.host->log("homeassistant: probe image=%p box=%p w=%u",
-                      (void *)probe_icon, (void *)probe_box,
-                      (unsigned int)display.width);
-    }
 
     ha.title_label = make_label(ha.screen, "", 0xF0, false);
     if (ha.title_label == 0) goto no_memory;
