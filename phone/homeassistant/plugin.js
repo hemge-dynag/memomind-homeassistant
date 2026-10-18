@@ -200,10 +200,11 @@ function domainOf(id) {
 }
 
 // Resolves the icon sent to the glasses: a known name -> its table index,
-// otherwise -1 (encoded as "no icon" by the protocol).
+// otherwise the domain default (which always maps to a known icon, so the
+// glasses never receive the "no icon" marker).
 function resolveGlassesIcon(name, entityId) {
   if (isKnownIcon(name)) return iconId(name);
-  return -1;
+  return iconId(defaultIconForDomain(domainOf(entityId)));
 }
 
 // Icon node for an entity, sized for a compact row. Returns null when unknown.

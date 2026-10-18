@@ -474,19 +474,9 @@ static gm_plugin_result_t homeassistant_start(void *context)
         int32_t top_y = HEADER_HEIGHT + SCREEN_MARGIN / 2
             + (int32_t)row * ha.row_height;
 
-        /* The glyph is created before the highlight rectangle: LVGL gives a
-         * child the next sibling index, so this order puts the glyph above the
-         * highlight (an opaque selected row would otherwise paint over it). */
-        if (ha.icon_column) {
-            ha.row_icon[row] = ha.ui->image_create(ha.screen, &ha_icons_dsc[0]);
-            if (ha.row_icon[row] == 0) goto no_memory;
-            ha.ui->obj_set_size(ha.row_icon[row], ICON_CELL, ICON_CELL);
-            ha.ui->obj_set_pos(ha.row_icon[row], SCREEN_MARGIN,
-                               top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
-            ha.ui->obj_add_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
-            ha.ui->obj_clear_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
-        }
-
+        /* The highlight rectangle is created first, then the glyph: LVGL draws
+         * children in creation order, so a later child sits above an earlier
+         * one and the glyph stays visible over the selected-row highlight. */
         ha.row_bg[row] = ha.ui->obj_create(ha.screen);
         if (ha.row_bg[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_bg[row],
@@ -500,6 +490,16 @@ static gm_plugin_result_t homeassistant_start(void *context)
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
         ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+
+        if (ha.icon_column) {
+            ha.row_icon[row] = ha.ui->image_create(ha.screen, &ha_icons_dsc[0]);
+            if (ha.row_icon[row] == 0) goto no_memory;
+            ha.ui->obj_set_size(ha.row_icon[row], ICON_CELL, ICON_CELL);
+            ha.ui->obj_set_pos(ha.row_icon[row], SCREEN_MARGIN,
+                               top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
+            ha.ui->obj_add_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+            ha.ui->obj_clear_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+        }
 
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
         if (ha.row_label[row] == 0) goto no_memory;
