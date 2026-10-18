@@ -80,8 +80,6 @@ typedef struct {
     gm_plugin_lvgl_obj_t *title_label;
     gm_plugin_lvgl_obj_t *row_bg[MAX_VISIBLE_ROWS]; /* selection highlight */
     gm_plugin_lvgl_obj_t *row_icon[MAX_VISIBLE_ROWS]; /* 16x16 glyph, or 0 */
-    gm_plugin_lvgl_obj_t *probe_icon;
-    gm_plugin_lvgl_obj_t *probe_box;
     gm_plugin_lvgl_obj_t *row_label[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *row_value[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *hint_label;
@@ -440,28 +438,6 @@ static gm_plugin_result_t homeassistant_start(void *context)
                       (unsigned int)ha.icon_column, (int)ha.label_x,
                       (int)ha.label_width, (int)ha.value_width);    }
 
-    /* TEMP diagnostic probe (v12-test): draw the lightbulb glyph at a fixed
-     * spot with no image object, then a 16x16 white square via a label
-     * background, to see whether ANY pixel or only image objects fail. */
-    ha.probe_icon = 0;
-    {
-        gm_plugin_lvgl_obj_t *root_probe = ha.ui->root_get();
-        ha.probe_icon = ha.ui->image_create(root_probe, &ha_icons_dsc[0]);
-        if (ha.probe_icon != 0) {
-            ha.ui->obj_set_pos(ha.probe_icon, (int32_t)display.width - 60, 4);
-            ha.ui->obj_set_size(ha.probe_icon, 16, 16);
-        }
-        ha.probe_box = ha.ui->obj_create(root_probe);
-        if (ha.probe_box != 0) {
-            ha.ui->obj_set_pos(ha.probe_box, (int32_t)display.width - 36, 4);
-            ha.ui->obj_set_size(ha.probe_box, 16, 16);
-            set_style(ha.probe_box, GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0xF0));
-            set_style(ha.probe_box, GM_PLUGIN_LVGL_STYLE_BG_OPA, number(255));
-        }
-        ha.host->log("homeassistant: probe image=%p box=%p",
-                      (void *)ha.probe_icon, (void *)ha.probe_box);
-    }
-
     root = ha.ui->root_get();
     if (root == 0) return GM_PLUGIN_ESTATE;
     ha.ui->obj_clean(root);
@@ -471,6 +447,26 @@ static gm_plugin_result_t homeassistant_start(void *context)
     ha.ui->obj_set_size(ha.screen, display.width, display.height);
     ha.ui->obj_align(ha.screen, GM_PLUGIN_LVGL_ALIGN_CENTER, 0, 0);
     style_panel(ha.screen, 0x00, 0, 0);
+
+    /* TEMP diagnostic probe (v12-test): glyph and plain box at the top-right,
+     * on the screen itself so nothing covers them. */
+    {
+        gm_plugin_lvgl_obj_t *probe_icon = ha.ui->image_create(ha.screen, &ha_icons_dsc[0]);
+        gm_plugin_lvgl_obj_t *probe_box = ha.ui->obj_create(ha.screen);
+        if (probe_icon != 0) {
+            ha.ui->obj_set_pos(probe_icon, (int32_t)display.width - 60, 4);
+            ha.ui->obj_set_size(probe_icon, 16, 16);
+        }
+        if (probe_box != 0) {
+            ha.ui->obj_set_pos(probe_box, (int32_t)display.width - 36, 4);
+            ha.ui->obj_set_size(probe_box, 16, 16);
+            set_style(probe_box, GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0xF0));
+            set_style(probe_box, GM_PLUGIN_LVGL_STYLE_BG_OPA, number(255));
+        }
+        ha.host->log("homeassistant: probe image=%p box=%p w=%u",
+                      (void *)probe_icon, (void *)probe_box,
+                      (unsigned int)display.width);
+    }
 
     ha.title_label = make_label(ha.screen, "", 0xF0, false);
     if (ha.title_label == 0) goto no_memory;
