@@ -247,8 +247,8 @@ function drawThermostat(ctx, config, state, allStates) {
 
 function drawSensor(ctx, config, state) {
   drawTitle(ctx, titleOf(config));
-  const name = config?.name || state?.attributes?.friendly_name || '';
-  if (!config?.name && name) drawText(ctx, name, 40, 110, CARD_WIDTH - 80, 24, { weight: '500', color: MUTED });
+  const name = config?.name || config?.title || state?.attributes?.friendly_name || '';
+  if (name) drawText(ctx, name, 40, 110, CARD_WIDTH - 80, 24, { weight: '500', color: MUTED });
   const shown = state ? String(state.state) : '—';
   const used = drawText(ctx, shown, CARD_WIDTH / 2, 218, CARD_WIDTH - 80, 96, { weight: '700', align: 'center' });
   const unit = unitOf(state);
@@ -327,8 +327,18 @@ export function renderCard(ctx, card, states) {
     case 'entities':
       drawEntityGrid(ctx, merged, states, card?.entities);
       break;
+    case 'heading':
+    case 'vertical-stack':
+    case 'horizontal-stack':
+    case 'grid':
+    case 'stack':
+    case 'glance':
+      // Composite cards: draw the first readable value instead of nothing.
+      textOrReadout(ctx, merged, state);
+      break;
     default:
-      if (isBarCard(type, merged)) drawBar(ctx, merged, state);
+      if (isReadoutCard(type, merged)) textOrReadout(ctx, merged, state);
+      else if (isBarCard(type, merged)) drawBar(ctx, merged, state);
       else drawValue(ctx, merged, state);
       break;
   }
@@ -343,6 +353,23 @@ function isBarCard(type, config) {
     type === 'progress' ||
     (config?.min !== undefined && config?.max !== undefined)
   );
+}
+
+// A card carrying neither a title nor a sentence is really a readout: draw its
+// value big with the entity name above, whichever Lovelace type it came from.
+function isReadoutCard(type, config) {
+  if (isBarCard(type, config)) return false;
+  if (typeof config?.content === 'string' && config.content.trim()) return false;
+  return !titleOf(config);
+}
+
+// Plain text without any Lovelace type is a markdown card in HA practice.
+function textOrReadout(ctx, config, state) {
+  if (typeof config?.content === 'string' && config.content.trim()) {
+    drawMarkdown(ctx, config);
+    return;
+  }
+  drawSensor(ctx, config, state);
 }
 
 // Converts RGBA pixels into GRAY_4 bytes: two pixels per byte, high nibble is

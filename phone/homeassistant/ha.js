@@ -241,6 +241,17 @@ function isImageCard(page) {
   return IMAGE_CARD_TYPES.has(type) || (type !== 'entities' && Boolean(page?.config?.type || page?.cardtype));
 }
 
+// A card whose only entity comes from its own config ("entity: sensor.x") is
+// painted as a picture too: listing that single entity would be a downgrade of
+// what the card shows. A card the user filled with explicit rows stays a list.
+function isConfigDrivenCard(entries, config) {
+  if (entries.length !== 1) return false;
+  const raw = config?.entity ?? config?.entities;
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const first = list.length ? (typeof list[0] === 'string' ? list[0] : list[0]?.entity) : '';
+  return typeof first === 'string' && first.trim() === entries[0].id;
+}
+
 export function buildPages(pages, statesById, { maxRows = 32, resolveIcon = null } = {}) {
   const out = [];
   for (const page of pages || []) {
@@ -248,7 +259,7 @@ export function buildPages(pages, statesById, { maxRows = 32, resolveIcon = null
     /* A card the row list cannot express becomes a picture: no rows, the card
      * type and raw config for cardrender.js, and the entities the integration
      * attached so a bare "sensor.x" config still resolves its state. */
-    if (isImageCard(page)) {
+    if (isImageCard(page) || isConfigDrivenCard(entries, page.config)) {
       const index = out.length;
       out.push({
         title: page.title || `Card ${index + 1}`,
