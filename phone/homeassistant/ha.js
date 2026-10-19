@@ -116,6 +116,45 @@ export async function fetchAllEntities(baseUrl, token) {
   return list;
 }
 
+// Lists the glasses dashboards published by the MemoMind Glasses Home
+// Assistant integration. A HA instance without the integration answers 404, so
+// the caller can fall back to the locally-edited cards.
+export async function fetchGlassesDashboards(baseUrl, token) {
+  const result = await haFetch(baseUrl, token, '/api/memomind_glasses/dashboards', {
+    timeoutMs: 8000,
+  });
+  const list = Array.isArray(result?.dashboards) ? result.dashboards : [];
+  return list.map((item) => ({
+    id: String(item.id ?? ''),
+    name: typeof item.name === 'string' ? item.name : '',
+    pageCount: Number(item.page_count) || 0,
+    rowCount: Number(item.row_count) || 0,
+  }));
+}
+
+// Fetches one dashboard, already flattened into glasses pages by the
+// integration: [{ title, entities: [{ id, name, icon }] }]. The structure is
+// the same as the local cards, so buildPages() renders both identically.
+export async function fetchGlassesDashboard(baseUrl, token, id) {
+  const result = await haFetch(
+    baseUrl,
+    token,
+    `/api/memomind_glasses/dashboards/${encodeURIComponent(String(id))}`,
+    { timeoutMs: 8000 },
+  );
+  const pages = Array.isArray(result?.pages) ? result.pages : [];
+  return pages.map((page) => ({
+    title: typeof page?.title === 'string' ? page.title : '',
+    entities: (Array.isArray(page?.entities) ? page.entities : [])
+      .map((entry) => ({
+        id: String(entry?.id || '').trim(),
+        name: typeof entry?.name === 'string' ? entry.name : '',
+        icon: typeof entry?.icon === 'string' ? entry.icon : '',
+      }))
+      .filter((entry) => entry.id),
+  }));
+}
+
 // Friendly label: prefer the entity's friendly_name attribute, otherwise the
 // entity_id with its domain stripped.
 export function entityLabel(state, entityId) {

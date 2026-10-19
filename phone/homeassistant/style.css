@@ -465,3 +465,36 @@ button.danger {
 }
 
 .icon-auto { font-size: 0.9rem; font-weight: 600; color: #8f9aab; }
+
+/* --- dashboards from the Home Assistant integration ---------------------- */
+
+.dashboards { margin: 20px 0; }
+
+.dashboards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.dashboard-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  background: #12161f;
+  cursor: pointer;
+}
+
+.dashboard-option.active {
+  border-color: #5aa9ff;
+  box-shadow: 0 0 0 1px #5aa9ff inset;
+}
+
+.dashboard-option input { margin: 0; }
+
+.dashboard-option .dashboard-name { flex: 1; font-weight: 600; }
+
+.dashboard-option .dashboard-meta { color: #8a93a6; font-size: 0.85em; }

@@ -21,6 +21,8 @@ import {
   callAction,
   entityEntry,
   fetchAllEntities,
+  fetchGlassesDashboard,
+  fetchGlassesDashboards,
   fetchStates,
   testConnection,
 } from './ha.js';
@@ -40,6 +42,10 @@ const els = {
   mainScreen: document.querySelector('#main-screen'),
   status: document.querySelector('#status'),
   syncButton: document.querySelector('#sync-button'),
+  dashboardsTitle: document.querySelector('#dashboards-title'),
+  dashboardsHint: document.querySelector('#dashboards-hint'),
+  dashboardsList: document.querySelector('#dashboards-list'),
+  refreshDashboardsButton: document.querySelector('#refresh-dashboards-button'),
   cardsTitle: document.querySelector('#cards-title'),
   cardsHint: document.querySelector('#cards-hint'),
   cardsList: document.querySelector('#cards-list'),
@@ -72,12 +78,17 @@ let entitiesCache = new Map();
 const expanded = new Set(); // open cards, keyed by page object
 let editingPage = null; // card currently in edit mode, or null
 let editSnapshot = null; // JSON snapshot of the card when editing started
+let glassesDashboards = []; // dashboards published by the HA integration
+let dashboardsError = ''; // non-empty when the integration is missing/failed
 
 function emptyConfig() {
   return {
     url: '',
     token: '',
     autoRefreshMinutes: DEFAULT_REFRESH_MINUTES,
+    // '' = use the local cards; otherwise the id of the dashboard selected in
+    // the MemoMind Glasses Home Assistant integration.
+    dashboardId: '',
     pages: [{ title: '', entities: [] }],
   };
 }
@@ -93,7 +104,8 @@ function applyStrings() {
   document.documentElement.lang = detectLocale();
   els.title.textContent = S.appTitle;
   els.settingsButton.textContent = S.settingsButton;
-  els.syncButton.textContent = S.syncNow;
+  els.dashboardsTitle.textContent = S.dashboardsLabel;
+  els.refreshDashboardsButton.textContent = S.refreshDashboards;
   els.cardsTitle.textContent = S.cardsLabel;
   els.cardsHint.textContent = S.cardsHint;
   els.addCardButton.textContent = S.addCard;
@@ -138,6 +150,7 @@ async function loadConfig() {
       url: value.url || '',
       token: value.token || '',
       autoRefreshMinutes: normalizeMinutes(value.autoRefreshMinutes),
+      dashboardId: typeof value.dashboardId === 'string' ? value.dashboardId : '',
       pages: Array.isArray(value.pages) && value.pages.length
         ? value.pages.map(normalizePage)
         : [{ title: '', entities: [] }],
@@ -169,7 +182,12 @@ function isConnectionReady() {
 
 function isConfigured() {
   if (!isConnectionReady()) return false;
+  if (config.dashboardId) return true;
   return config.pages.some((p) => p.entities.length > 0);
+}
+
+function useRemoteDashboard() {
+  return Boolean(config.dashboardId);
 }
 
 // --- entity helpers ---------------------------------------------------------
@@ -288,6 +306,7 @@ function showMain() {
   els.settingsScreen.hidden = true;
   els.mainScreen.hidden = false;
   els.settingsButton.hidden = false;
+  renderDashboards();
 }
 
 function showSettings() {
@@ -295,6 +314,86 @@ function showSettings() {
   els.mainScreen.hidden = true;
   els.settingsScreen.hidden = false;
   els.settingsButton.hidden = true;
+  void refreshDashboards();
+}
+
+// --- dashboards (Home Assistant integration) -------------------------------
+
+// Lists the dashboards the MemoMind Glasses integration publishes. Called when
+// the settings screen opens and when the user taps "Actualiser". A 404 means
+// the integration is not installed: the phone then keeps using local cards.
+async function refreshDashboards({ quiet = false } = {}) {
+  if (!isConnectionReady()) {
+    glassesDashboards = [];
+    dashboardsError = '';
+    renderDashboards();
+    return;
+  }
+  if (!quiet) setStatus(S.statusLoadingDashboards);
+  try {
+    glassesDashboards = await fetchGlassesDashboards(config.url, config.token);
+    dashboardsError = '';
+    // A dashboard deleted on the HA side silently falls back to local cards.
+    if (config.dashboardId && !glassesDashboards.some((d) => d.id === config.dashboardId)) {
+      config.dashboardId = '';
+      await persistConfig();
+    }
+  } catch (error) {
+    glassesDashboards = [];
+    dashboardsError = error.message || String(error);
+  }
+  renderDashboards();
+}
+
+function renderDashboards() {
+  els.dashboardsList.replaceChildren();
+  els.dashboardsHint.textContent = dashboardsError
+    ? format(S.dashboardsUnavailable, { msg: dashboardsError })
+    : glassesDashboards.length
+      ? S.dashboardsHint
+      : S.dashboardsEmpty;
+
+  const local = dashboardOption(null, S.dashboardsLocal, S.dashboardsLocalMeta);
+  els.dashboardsList.append(local);
+  for (const dashboard of glassesDashboards) {
+    els.dashboardsList.append(
+      dashboardOption(
+        dashboard.id,
+        dashboard.name || S.dashboardsUntitled,
+        format(S.dashboardsMeta, {
+          pages: dashboard.pageCount,
+          rows: dashboard.rowCount,
+        }),
+      ),
+    );
+  }
+}
+
+function dashboardOption(id, name, meta) {
+  const label = document.createElement('label');
+  label.className = `dashboard-option${(config.dashboardId || '') === (id || '') ? ' active' : ''}`;
+  const input = document.createElement('input');
+  input.type = 'radio';
+  input.name = 'glasses-dashboard';
+  input.checked = (config.dashboardId || '') === (id || '');
+  input.addEventListener('change', () => void selectDashboard(id || ''));
+  const text = document.createElement('span');
+  text.className = 'dashboard-name';
+  text.textContent = name;
+  const detail = document.createElement('span');
+  detail.className = 'dashboard-meta';
+  detail.textContent = meta || '';
+  label.append(input, text, detail);
+  return label;
+}
+
+// Persists the choice and pushes the matching pages straight away, so the
+// wearer sees the new dashboard without waiting for the next auto-refresh.
+async function selectDashboard(id) {
+  config.dashboardId = id;
+  await persistConfig();
+  renderDashboards();
+  if (connected) await syncPages();
 }
 
 // --- cards ------------------------------------------------------------------
@@ -741,7 +840,15 @@ async function syncPages() {
   try {
     setStatus(S.statusPushing);
     entitiesCache = await fetchStates(config.url, config.token);
-    const pages = buildPages(config.pages, entitiesCache, {
+    let source = config.pages;
+    if (useRemoteDashboard()) {
+      source = await fetchGlassesDashboard(
+        config.url,
+        config.token,
+        config.dashboardId,
+      );
+    }
+    const pages = buildPages(source, entitiesCache, {
       maxRows: MAX_ROWS,
       resolveIcon: resolveGlassesIcon,
     });
@@ -830,6 +937,7 @@ els.backButton.addEventListener('click', showMain);
 els.testButton.addEventListener('click', () => void onTest());
 els.loadButton.addEventListener('click', () => void onLoadEntities());
 els.syncButton.addEventListener('click', () => void syncPages());
+els.refreshDashboardsButton.addEventListener('click', () => void refreshDashboards());
 els.addCardButton.addEventListener('click', addCard);
 
 // Reordering the cards rewrites config.pages from the new DOM order.
@@ -867,6 +975,7 @@ async function start() {
     await loadConfig();
     applyStrings();
     renderCards();
+    renderDashboards();
     showMain();
     const info = await gm.device.getInfo();
     connected = Boolean(info.connected);
