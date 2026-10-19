@@ -1,11 +1,8 @@
-// Sends card pictures to the glasses, which show them through the public
-// display channels (GRAY_4 tiles, LZ4 compressed when the device supports it).
-// Mirrors the "present" logic of the life-desk example, kept standalone so the
-// dashboard sync path stays readable.
+// Sends card pictures to the glasses through the public display channels: one
+// raw GRAY_4 updateImage per tile.
 
 const TILE_WIDTH = 600;
 const TILE_HEIGHT = 175;
-
 function bytesToBase64(bytes) {
   let binary = '';
   const chunk = 8192;
@@ -121,23 +118,17 @@ export function sliceGray4(frame, width, height) {
   return tiles;
 }
 
-// Pushes one GRAY_4 picture to the glasses, atomically when the device accepts
-// multi-tile frames, otherwise tile by tile with raw GRAY_4. A failed atomic
-// attempt draws nothing (the firmware discards an incomplete frame), so the
-// raw fallback always repaints the whole picture. Returns the tile count.
+// Pushes one GRAY_4 picture to the glasses, tile by tile, and returns the tile
+// count.
 export async function presentGray4(gm, frame, width, height) {
   const tiles = sliceGray4(frame, width, height);
   if (tiles.length === 0) return 0;
 
-  if (tiles.length > 1) {
-    try {
-      await presentFrame(gm, tiles);
-      return tiles.length;
-    } catch (error) {
-      // An incomplete frame is discarded by the firmware, so the raw fallback
-      // below always repaints the whole picture. Never leave a black page.
-    }
-  }
+  // Atomic multi-tile frames are not used: on real glasses the device's frame
+  // status for channel 9 arrives after the Host has already given up, so every
+  // picture ended in "frame ACK timed out". A full picture is well within the
+  // raw GRAY_4 message limit (105 000 bytes, limit 81 891), so one updateImage
+  // per tile is both simpler and reliable.
 
   for (const tile of tiles) {
     await gm.display.updateImage({
@@ -150,35 +141,4 @@ export async function presentGray4(gm, frame, width, height) {
     });
   }
   return tiles.length;
-}
-
-// Atomic multi-tile frame. The host waits for a device acknowledgement after
-// the Begin and after every tile, so a slow picture transfer surfaces as a
-// frame ACK timeout; the caller falls back to raw tiles in that case.
-async function presentFrame(gm, tiles) {
-  const frameId = nextFrameId();
-  await gm.display.beginFrame({ frameId, tileCount: tiles.length });
-  for (let index = 0; index < tiles.length; index += 1) {
-    const tile = tiles[index];
-    const compressed = lz4CompressBlock(tile.bytes);
-    await gm.display.updateFrameImageLz4({
-      frameId,
-      tileIndex: index,
-      x: tile.x,
-      y: tile.y,
-      width: tile.width,
-      height: tile.height,
-      stride: tile.stride,
-      decodedSize: tile.bytes.length,
-      dataBase64: bytesToBase64(compressed),
-    });
-  }
-}
-
-let frameCounter = 1;
-
-function nextFrameId() {
-  const frameId = frameCounter;
-  frameCounter = frameCounter >= 0xffffffff ? 1 : frameCounter + 1;
-  return frameId;
 }

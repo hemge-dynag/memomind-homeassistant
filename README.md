@@ -112,9 +112,9 @@ se rafraichissent automatiquement apres chaque action.
   Une carte **YAML** ou reduite a **une seule entite** (par ex.
   `custom:mini-graph-card`) est elle aussi rendue en image (telephone 1.8.1) :
   son nom, sa valeur et son unite s'affichent au lieu d'une liste d'une ligne.
-  Si le transfert de l'image echoue (par ex. « frame ACK timed out »), le
-  telephone repasse automatiquement en tuiles brutes : la carte s'affiche
-  quand meme, au lieu de laisser la page vide.
+  L'image est envoyee en tuiles GRAY_4 brutes (un `updateImage` par tuile) :
+  le transfert atomique multi-tuiles provoquait « frame ACK timed out » sur les
+  lunettes et a donc ete abandonne.
 - Jusqu'a **32 lignes** par page (seules les lignes qui tiennent a l'ecran sont
   dessinees ; les autres sont atteintes en defilant), **24 pages** maximum
   (contraintes de memoire du plugin lunettes : RAM statique < 100 KiB,
@@ -149,7 +149,7 @@ se rafraichissent automatiquement apres chaque action.
 glass/homeassistant/    # homeassistant.c, ha_icons.h + manifest.json (GMP lunettes)
 phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js, icons.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.8.2.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.8.3.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -159,7 +159,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.8.2.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.8.3.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous
