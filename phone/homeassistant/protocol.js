@@ -10,6 +10,9 @@ export const COMMAND_CLEAR = 2;
 
 export const EVENT_PAGE_CHANGED = 1;
 export const EVENT_ACTION = 2;
+/* The glasses ask for the picture of a card it cannot list (empty row set).
+ * The phone then pushes it as GRAY_4 tiles on the public display channels. */
+export const EVENT_REQUEST_CARD = 3;
 
 export const MAX_PAGES = 24;
 export const MAX_ROWS = 32;
@@ -33,7 +36,8 @@ function clampBytes(text, max) {
 // [version, cmd, page_count(2),
 //   { title_len, title,
 //     row_count(2),
-//     { icon_id, label_len, label, value_len, value, action_len, action } * row_count } * page_count ]
+//     { icon_id, label_len, label, value_len, value, action_len, action } * row_count } * page_count ,
+//   image_flag * page_count ]
 // `action` is the entity id the glasses echo back when the row is activated.
 // `icon_id` is the row's icon index in the glasses table (0xFF = none).
 export function encodeSetPages(pages) {
@@ -66,7 +70,10 @@ export function encodeSetPages(pages) {
     COMMAND_SET_PAGES,
     pageCount & 0xff, (pageCount >> 8) & 0xff,
   ]);
-  return concat([header, ...chunks]);
+  // Trailer: one flag per page, 1 = the page shows a card picture pushed
+  // separately through the display channels instead of a row list.
+  const flags = new Uint8Array(list.map((page) => (page.card ? 1 : 0)));
+  return concat([header, ...chunks, flags]);
 }
 
 // [version, cmd, 0, 0]
@@ -76,9 +83,11 @@ export function encodeClear() {
 
 // [version, event, page_index]            -> { type: 'page-changed', index }
 // [version, event, action_len, action...] -> { type: 'action', action }
+// [version, event, page_index, 0]         -> { type: 'request-card', index }
 export function decodeEvent(data) {
   if (!data || data.length < 3 || data[0] !== PROTOCOL_VERSION) return null;
   if (data[1] === EVENT_PAGE_CHANGED) return { type: 'page-changed', index: data[2] };
+  if (data[1] === EVENT_REQUEST_CARD) return { type: 'request-card', index: data[2] };
   if (data[1] === EVENT_ACTION) {
     const len = data[2];
     if (data.length < 3 + len) return null;

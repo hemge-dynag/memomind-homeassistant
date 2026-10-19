@@ -77,6 +77,9 @@ defini, sinon le `friendly_name` Home Assistant, sinon l'`entity_id`.
 - **Tete baissee** : selection vers le bas.
 - **Bouton** : execute l'action de la ligne selectionnee (l'unite est
   allumee/eteinte, la scene est lancee…).
+- Sur une page **image**, incliner la tete vers le bas ou appuyer sur le bouton
+  recharge l'image de la carte (elle arrive toute seule a l'ouverture de la
+  page ; le geste sert apres une actualisation).
 - Navigation **circulaire** (on revient a la premiere apres la derniere).
 
 Chaque page affiche un titre avec sa position `i/n` (et `lignes visibles/total`
@@ -100,8 +103,12 @@ se rafraichissent automatiquement apres chaque action.
 
 ## Limites
 
-- Les valeurs sont **textuelles** uniquement (etat + unite de mesure). Pas de
-  graphiques ni de cartes Home Assistant sur les lunettes.
+- Les cartes qui ne se pretent pas a une liste de lignes (jauge, markdown,
+  thermostat, capteur, barre…) sont **dessinees en image** par le telephone
+  (600x350, quatre niveaux de gris) puis affichees sur les lunettes. L'image
+  n'est pas animee : apres une actualisation, incliner la tete vers le bas
+  (ou appuyer sur le bouton) sur la page recharge l'image. Les cartes
+  composites (sous-cartes empilees, image de camera) restent simplifiees.
 - Jusqu'a **32 lignes** par page (seules les lignes qui tiennent a l'ecran sont
   dessinees ; les autres sont atteintes en defilant), **24 pages** maximum
   (contraintes de memoire du plugin lunettes : RAM statique < 100 KiB,
@@ -124,7 +131,11 @@ se rafraichissent automatiquement apres chaque action.
 - Canaux de messages : `0x4841` ('HA', telephone -> lunettes),
   `0x4853` ('HS', lunettes -> telephone).
 - Evenements lunettes -> telephone : `EVENT_PAGE_CHANGED`, `EVENT_ACTION`
-  (action de la ligne selectionnee).
+  (action de la ligne selectionnee), `EVENT_REQUEST_CARD` (afficher l'image de
+  la carte de la page courante).
+- Images : le telephone envoie les pixels par les canaux d'affichage standard
+  (`display.beginFrame` + `display.updateFrameImageLz4`, repli
+  `display.updateImage`), en tuiles de 600x175.
 
 ## Structure du depot
 
@@ -132,7 +143,7 @@ se rafraichissent automatiquement apres chaque action.
 glass/homeassistant/    # homeassistant.c, ha_icons.h + manifest.json (GMP lunettes)
 phone/homeassistant/    # index.html, plugin.js, protocol.js, ha.js, icons.js,
                         # translations.js, style.css, vendor/, manifest.json
-builds/                 # homeassistant.gmp, homeassistant-1.5.0.mmpkg + zips sources
+builds/                 # homeassistant.gmp, homeassistant-1.8.0.mmpkg + zips sources
 ```
 
 ## Compilation
@@ -142,7 +153,7 @@ Depuis la racine du SDK Plugin Open Platform :
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 python3 build.py glass   # -> GlassSDK/build-host/.build/homeassistant/homeassistant.gmp
-python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.5.0.mmpkg
+python3 build.py web     # -> PhoneSDK/dist/homeassistant-1.8.0.mmpkg
 ```
 
 Le SDK decouvre automatiquement l'exemple via les `manifest.json` sous

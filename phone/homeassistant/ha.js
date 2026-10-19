@@ -133,8 +133,9 @@ export async function fetchGlassesDashboards(baseUrl, token) {
 }
 
 // Fetches one dashboard, already flattened into glasses pages by the
-// integration: [{ title, entities: [{ id, name, icon }] }]. The structure is
-// the same as the local cards, so buildPages() renders both identically.
+// integration: [{ title, cardtype, config, entities: [{ id, name, icon }] }].
+// A card with rows renders as the usual list; a card without rows (gauge,
+// markdown, thermostat, ...) is painted as a bitmap by cardrender.js.
 export async function fetchGlassesDashboard(baseUrl, token, id) {
   const result = await haFetch(
     baseUrl,
@@ -145,6 +146,8 @@ export async function fetchGlassesDashboard(baseUrl, token, id) {
   const pages = Array.isArray(result?.pages) ? result.pages : [];
   return pages.map((page) => ({
     title: typeof page?.title === 'string' ? page.title : '',
+    cardtype: typeof page?.cardtype === 'string' ? page.cardtype : 'entities',
+    config: page?.config && typeof page.config === 'object' ? page.config : {},
     entities: (Array.isArray(page?.entities) ? page.entities : [])
       .map((entry) => ({
         id: String(entry?.id || '').trim(),
@@ -153,6 +156,21 @@ export async function fetchGlassesDashboard(baseUrl, token, id) {
       }))
       .filter((entry) => entry.id),
   }));
+}
+
+// Every entity id a card depends on, in wire order: the card's explicit
+// entity/entities plus its row list. Used to fetch just the states one card
+// picture needs (the image path does not need the whole instance).
+export function cardEntityIds(card) {
+  const ids = [];
+  const push = (value) => {
+    const id = typeof value === 'string' ? value : value?.entity;
+    if (typeof id === 'string' && id.trim() && !ids.includes(id.trim())) ids.push(id.trim());
+  };
+  const raw = card?.config?.entity ?? card?.config?.entities;
+  for (const item of Array.isArray(raw) ? raw : raw ? [raw] : []) push(item);
+  for (const entry of Array.isArray(card?.entities) ? card.entities : []) push(entry?.id ?? entry);
+  return ids;
 }
 
 // Friendly label: prefer the entity's friendly_name attribute, otherwise the
@@ -206,10 +224,44 @@ export function entityEntry(entry) {
 // temporarily-unavailable entity does not silently shift the layout. Cards
 // without any entity are dropped. Right now a card can hold up to maxRows
 // rows; the glasses scroll within a card when there are more than fit.
+// These card types are painted as a bitmap instead of a row list (see
+// cardrender.js), even when the integration attached entities to them: their
+// entity list is only there so a bare "sensor.x" config can resolve its state.
+// An entities card left empty on the HA side is still skipped.
+const IMAGE_CARD_TYPES = new Set([
+  'gauge', 'markdown', 'thermostat', 'climate', 'sensor', 'statistics',
+  'history-graph', 'picture', 'picture-entities', 'media-control', 'weather-forecast',
+  'bar', 'input_number', 'number', 'progress',
+]);
+
+// Known types are always pictures; any other non-entities type is treated as
+// one too, so an unknown card still shows its entity instead of a blank page.
+function isImageCard(page) {
+  const type = String(page?.cardtype || page?.config?.type || 'entities').toLowerCase();
+  return IMAGE_CARD_TYPES.has(type) || (type !== 'entities' && Boolean(page?.config?.type || page?.cardtype));
+}
+
 export function buildPages(pages, statesById, { maxRows = 32, resolveIcon = null } = {}) {
   const out = [];
   for (const page of pages || []) {
     const entries = (page.entities || []).map(entityEntry).filter((e) => e.id);
+    /* A card the row list cannot express becomes a picture: no rows, the card
+     * type and raw config for cardrender.js, and the entities the integration
+     * attached so a bare "sensor.x" config still resolves its state. */
+    if (isImageCard(page)) {
+      const index = out.length;
+      out.push({
+        title: page.title || `Card ${index + 1}`,
+        rows: [],
+        card: {
+          title: page.title || '',
+          cardtype: page.cardtype || page.config?.type || '',
+          config: page.config || {},
+        },
+        entities: entries,
+      });
+      continue;
+    }
     if (entries.length === 0) continue;
     const rows = [];
     for (const entry of entries.slice(0, maxRows)) {

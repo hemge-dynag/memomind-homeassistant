@@ -19,6 +19,7 @@ import {
 import {
   buildPages,
   callAction,
+  cardEntityIds,
   entityEntry,
   fetchAllEntities,
   fetchGlassesDashboard,
@@ -26,6 +27,8 @@ import {
   fetchStates,
   testConnection,
 } from './ha.js';
+import { CARD_HEIGHT, CARD_WIDTH, cardToGray4 } from './cardrender.js';
+import { presentGray4 } from './display.js';
 
 const S = getStrings(detectLocale());
 
@@ -80,6 +83,10 @@ let editingPage = null; // card currently in edit mode, or null
 let editSnapshot = null; // JSON snapshot of the card when editing started
 let glassesDashboards = []; // dashboards published by the HA integration
 let dashboardsError = ''; // non-empty when the integration is missing/failed
+let imagePages = []; // glasses pages carrying a card picture, by page index
+let cardCanvas = null; // reused offscreen canvas for card rendering
+let lastCardKey = ''; // card + states signature of the picture on screen
+let cardInFlight = null; // pending picture push (the phone sends one at a time)
 
 function emptyConfig() {
   return {
@@ -853,6 +860,8 @@ async function syncPages() {
       resolveIcon: resolveGlassesIcon,
     });
     await pushToGlasses(pages);
+    imagePages = pages;
+    requestAllCardImages();
   } catch (error) {
     setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
   }
@@ -864,6 +873,8 @@ async function pushToGlasses(pages) {
     return;
   }
   if (pages.length === 0) {
+    imagePages = [];
+    lastCardKey = '';
     await gm.plugin.sendMessage(PAGES_CHANNEL, encodeClear());
     setStatus(S.statusSaved);
     return;
@@ -872,6 +883,71 @@ async function pushToGlasses(pages) {
   await gm.plugin.sendMessage(PAGES_CHANNEL, payload);
   const titles = pages.slice(0, 3).map((p) => p.title).join(', ');
   setStatus(format(S.statusPushed, { n: pages.length, titles }), 'ready');
+}
+
+// --- card pictures ----------------------------------------------------------
+
+// One reusable canvas: the browser then keeps a single backing store for every
+// card instead of allocating one per refresh.
+function getCardCanvas() {
+  if (!cardCanvas) {
+    cardCanvas = document.createElement('canvas');
+    cardCanvas.width = CARD_WIDTH;
+    cardCanvas.height = CARD_HEIGHT;
+  }
+  return cardCanvas;
+}
+
+// Fetches just the states the picture needs, reusing the values already loaded
+// when the whole dashboard was fetched a moment ago.
+async function cardStates(card) {
+  const ids = cardEntityIds(card);
+  if (ids.length === 0) return entitiesCache;
+  try {
+    return await fetchStates(config.url, config.token);
+  } catch {
+    return entitiesCache;
+  }
+}
+
+// Renders one card and pushes it to the glasses as GRAY_4 tiles. Pictures are
+// drawn right under the title band: the glasses keep that band and let the
+// rest of the screen show the pixels.
+async function pushCardImage(card, index) {
+  if (!connected || !card) return;
+  const states = await cardStates(card);
+  const signature = JSON.stringify({
+    index,
+    card,
+    states: cardEntityIds(card).map((id) => states.get(id)?.state ?? ''),
+  });
+  if (signature === lastCardKey) return;
+  const frame = cardToGray4(card, states, getCardCanvas());
+  try {
+    await presentGray4(gm, frame, CARD_WIDTH, CARD_HEIGHT);
+    lastCardKey = signature;
+  } catch (error) {
+    setStatus(format(S.statusError, { msg: error.message || String(error) }), 'error');
+  }
+}
+
+// Runs one picture push at a time: a nod right after the pages arrive must not
+// interleave its tiles with the sync's own push.
+function requestCardImage(index) {
+  const page = imagePages[index];
+  if (!page || !page.card) return;
+  cardInFlight = (cardInFlight || Promise.resolve())
+    .then(() => pushCardImage(page.card, index))
+    .catch(() => {});
+}
+
+// Pushes every picture page of the freshly synced dashboard, in page order,
+// so a nod only has to redraw a single size afterwards.
+function requestAllCardImages() {
+  lastCardKey = '';
+  imagePages.forEach((page, index) => {
+    if (page && page.card) requestCardImage(index);
+  });
 }
 
 // --- events -----------------------------------------------------------------
@@ -951,6 +1027,7 @@ const offMessages = gm.plugin.onMessage((message) => {
   const event = decodeEvent(message.data);
   if (!event) return;
   if (event.type === 'action') void onAction(event.action);
+  if (event.type === 'request-card') requestCardImage(event.index);
 });
 
 // Runs the action of the row selected on the glasses: calls the matching Home
@@ -982,6 +1059,9 @@ async function start() {
     setStatus(connected ? S.statusConnected : S.statusDisconnected, connected ? 'ready' : 'error');
     scheduleAutoRefresh();
     await gm.device.subscribeEvents(['connection']);
+    // A dashboard selected on the phone shows up as soon as the glasses are
+    // there, without waiting for a manual sync or the auto-refresh timer.
+    if (connected && isConfigured()) void syncPages();
     gm.device.onConnection((event) => {
       connected = Boolean(event.connected);
       setStatus(connected ? S.statusConnected : S.statusDisconnected, connected ? 'ready' : 'error');

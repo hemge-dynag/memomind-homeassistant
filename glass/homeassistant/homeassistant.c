@@ -24,6 +24,7 @@
 
 #define EVENT_PAGE_CHANGED UINT8_C(1)
 #define EVENT_ACTION UINT8_C(2)
+#define EVENT_REQUEST_CARD UINT8_C(3)
 
 #define MAX_PAGES 24U
 /* Rows buffered per page. The visible window is smaller; the rest is reachable
@@ -73,6 +74,10 @@ typedef struct {
     char title[MAX_TITLE_BYTES + 1U];
     ha_row_t rows[MAX_ROWS_PER_PAGE];
     uint8_t row_count;
+    /* A card the phone cannot express as rows (gauge, markdown, thermostat...):
+     * the page owns the screen and shows either its picture or a hint, and a
+     * head nod asks the phone to (re)send that picture. */
+    bool image;
 } ha_page_t;
 
 typedef struct {
@@ -98,7 +103,23 @@ typedef struct {
     int32_t label_x;        /* left edge of the label text */
     int32_t value_width;    /* value column width (right-aligned) */
     uint8_t language; /* 0=fr 1=en 2=es 3=it 4=de 5=zh-CN */
+    uint32_t display_width;
+    uint32_t display_height;
+    /* Rectangles standing in for the cleared list while a card picture is on
+     * screen: the picture is written straight to the framebuffer, so any LVGL
+     * widget on top of it would hide it. */
+    gm_plugin_lvgl_obj_t *remote_rect[MAX_VISIBLE_ROWS + 2U];
+    uint8_t remote_rect_count;
+    bool connected; /* phone link state, mirrored from connection events */
+    uint16_t image_page; /* page whose card picture is on screen, or NO_PAGE */
+    uint16_t image_width; /* geometry of the picture last shown */
+    uint16_t image_height;
+    int32_t image_x;
+    int32_t image_y;
 } ha_t;
+
+#define NO_PAGE 0xFFFFU
+#define NO_OFFSET 0xFFFFFFFFU
 
 /* The page payloads live in their own array (not inside ha_t): keeping the
  * hot scalar state in a small struct lets the compiler address it with compact
@@ -168,7 +189,7 @@ static void show_row_icon(uint32_t slot, uint8_t icon)
 {
     const gm_plugin_lvgl_image_dsc_t *dsc;
 
-    if (ha.row_icon[slot] == 0) return;
+    if (slot >= MAX_VISIBLE_ROWS || ha.row_icon[slot] == 0) return;
     if (icon == NO_ICON) icon = HA_ICON_FALLBACK;
     if (icon >= HA_ICON_COUNT) icon = HA_ICON_FALLBACK;
     dsc = &ha_icons_dsc[icon];
@@ -184,8 +205,55 @@ static void show_row_icon(uint32_t slot, uint8_t icon)
 
 static void hide_row_icon(uint32_t slot)
 {
-    if (ha.row_icon[slot] == 0) return;
+    if (slot >= MAX_VISIBLE_ROWS || ha.row_icon[slot] == 0) return;
     set_style(ha.row_icon[slot], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
+}
+
+static void refresh_page(void);
+static void run_action(void);
+static void change_page(int32_t delta);
+static void request_card_image(void);
+static void move_selection(int32_t delta);
+static void blank_rows(void);
+static void add_remote_rect(int32_t x, int32_t y, int32_t width, int32_t height);
+static void drop_remote_rects(void);
+static void repaint_above_image(void);
+static void layout_band_label(void);
+static void on_image_presented(void);
+
+/* Replaces a visible row with a single centered sentence. Used by image pages
+ * for their waiting state. */
+static void show_message(uint32_t slot, const char *text)
+{
+    if (slot >= ha.visible_rows) return;
+    hide_row_icon(slot);
+    ha.ui->label_set_text(ha.row_label[slot], text);
+    ha.ui->label_set_text(ha.row_value[slot], "");
+    set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
+}
+
+static void blank_rows(void)
+{
+    uint32_t slot;
+    for (slot = 0U; slot < ha.visible_rows; slot++) {
+        ha.ui->label_set_text(ha.row_label[slot], "");
+        ha.ui->label_set_text(ha.row_value[slot], "");
+        hide_row_icon(slot);
+        set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
+    }
+}
+
+/* Asks the phone for the picture of the image page currently shown. */
+static void request_card_image(void)
+{
+    uint8_t payload[3];
+    if (ha.page_count == 0U || !ha_pages[ha.page_index].image) return;
+    if (!ha.connected) return;
+    payload[0] = PROTOCOL_VERSION;
+    payload[1] = EVENT_REQUEST_CARD;
+    payload[2] = (uint8_t)(ha.page_index & 0xFFU);
+    ha.host->log("homeassistant: request_card page=%u", (unsigned int)ha.page_index);
+    (void)ha.host->bt_send(EVENT_CHANNEL, payload, sizeof(payload));
 }
 
 static uint16_t read_u16(const uint8_t *data)
@@ -203,97 +271,313 @@ static void fill_row_text(char *out, size_t capacity, const char *label)
     out[used] = '\0';
 }
 
-/* Renders the current page: title with an "i/n" position marker, the visible
- * slice of label/value rows starting at scroll_offset, and a navigation hint.
- * Rows past the page's row_count are blanked so a shorter page never shows
- * stale entries. */
-static void refresh_page(void)
+/* Reads the panel size once and derives the row geometry from it. Called at
+ * start and whenever the list widgets are rebuilt. */
+static gm_plugin_result_t layout(void)
 {
-    char title[64];
-    char row_text[MAX_LABEL_BYTES + 4U];
-    uint32_t slot;
+    gm_plugin_display_info_t display;
+    int32_t rows_area_height;
 
-    if (ha.page_count == 0U) {
-        ha.ui->label_set_text(ha.title_label,
-            L("Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant"));
-        for (slot = 0U; slot < ha.visible_rows; slot++) {
-            ha.ui->label_set_text(ha.row_label[slot], "");
-            ha.ui->label_set_text(ha.row_value[slot], "");
-            hide_row_icon(slot);
-            set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
-        }
-        ha.ui->label_set_text(ha.hint_label,
-            L("En attente du telephone...", "Waiting for the phone...", "Esperando al teléfono...", "In attesa del telefono...", "Warte auf das Telefon...", "正在等待手机..."));
-        return;
-    }
+    if (ha.host->display_get_info(&display) != GM_PLUGIN_OK ||
+        display.width <= SCREEN_MARGIN * 2U)
+        return GM_PLUGIN_ESTATE;
 
-    {
-        const ha_page_t *page = &ha_pages[ha.page_index];
-        uint16_t total_rows = page->row_count;
-        uint16_t max_offset;
-        uint32_t pos = (uint32_t)(ha.page_index + 1U);
-        uint32_t total = (uint32_t)ha.page_count;
-        int written = 0;
-        const char *src = page->title;
+    rows_area_height = (int32_t)display.height - HEADER_HEIGHT - HINT_HEIGHT
+                       - SCREEN_MARGIN;
+    /* Fit as many rows as the panel allows, capped by MAX_VISIBLE_ROWS. Rows
+     * beyond that stay in the page buffer and are reached by scrolling. Each
+     * drawn row is sized from this area so the window always fits between the
+     * header and the hint instead of overrunning the hint. */
+    ha.visible_rows = (uint8_t)(rows_area_height / ROW_MIN_HEIGHT);
+    if (ha.visible_rows > MAX_VISIBLE_ROWS) ha.visible_rows = MAX_VISIBLE_ROWS;
+    if (ha.visible_rows == 0U) return GM_PLUGIN_ESTATE;
+    ha.row_height = rows_area_height / (int32_t)ha.visible_rows;
+    if (ha.row_height < ROW_MIN_HEIGHT) return GM_PLUGIN_ESTATE;
+    /* Rows fill rows_area_height exactly; anchor them just under the header. */
+    rows_area_height = (int32_t)ha.visible_rows * ha.row_height;
+    ha.display_width = display.width;
+    ha.display_height = display.height;
 
-        /* Keep the window inside the page after a refresh that shortened it. */
-        max_offset = (total_rows > ha.visible_rows)
-            ? (uint16_t)(total_rows - ha.visible_rows) : 0U;
-        if (ha.scroll_offset > max_offset) ha.scroll_offset = max_offset;
-
-        /* Title then "i/n" appended manually to avoid snprintf dependency. */
-        while (*src != '\0' && written < 48) title[written++] = *src++;
-        title[written++] = ' ';
-        title[written++] = ' ';
-        if (pos >= 10U) title[written++] = (char)('0' + (pos / 10U) % 10U);
-        title[written++] = (char)('0' + pos % 10U);
-        title[written++] = '/';
-        if (total >= 10U) title[written++] = (char)('0' + (total / 10U) % 10U);
-        title[written++] = (char)('0' + total % 10U);
-        /* Scroll position marker when the page overflows the screen. */
-        if (total_rows > ha.visible_rows) {
-            uint16_t last = (uint16_t)(ha.scroll_offset + ha.visible_rows);
-            title[written++] = ' ';
-            if (last >= 10U) title[written++] = (char)('0' + (last / 10U) % 10U);
-            title[written++] = (char)('0' + last % 10U);
-            title[written++] = '/';
-            if (total_rows >= 10U) title[written++] = (char)('0' + (total_rows / 10U) % 10U);
-            title[written++] = (char)('0' + total_rows % 10U);
-        }
-        title[written] = '\0';
-        ha.ui->label_set_text(ha.title_label, title);
-
-        for (slot = 0U; slot < ha.visible_rows; slot++) {
-            uint32_t row = (uint32_t)ha.scroll_offset + slot;
-            bool is_selected = (row < page->row_count) && ((uint16_t)row == ha.selected);
-            if (row < page->row_count) {
-                fill_row_text(row_text, sizeof(row_text),
-                              page->rows[row].label);
-                ha.ui->label_set_text(ha.row_label[slot], row_text);
-                ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
-                show_row_icon(slot, page->rows[row].icon);
-            } else {
-                ha.ui->label_set_text(ha.row_label[slot], "");
-                ha.ui->label_set_text(ha.row_value[slot], "");
-                hide_row_icon(slot);
-            }
-            /* Highlight the selected row; the others keep a transparent
-             * background so the highlight follows the cursor. */
-            set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA,
-                      number(is_selected ? 255 : 0));
-        }
-
-        /* Navigation hints were removed at the wearer's request: the head
-         * gestures are discoverable on their own and the text crowded the
-         * rows. The label is kept (empty) so the layout stays unchanged. */
-        ha.ui->label_set_text(ha.hint_label, "");
-    }
+    ha.host->log("homeassistant: display %ux%u visible_rows=%u row_height=%d area=%d",
+                  (unsigned int)display.width, (unsigned int)display.height,
+                  (unsigned int)ha.visible_rows, (int)ha.row_height,
+                  (int)rows_area_height);
+    return GM_PLUGIN_OK;
 }
 
-/* Keeps the selected row inside the visible window, scrolling the page as
- * needed so the cursor can never leave the screen. */
+/* Creates the screen and the navigation hint. Shared by the list view and by
+ * the overlay that sits on top of a card picture. */
+static gm_plugin_result_t build_frame(void)
+{
+    gm_plugin_lvgl_obj_t *root;
+    int32_t width;
+
+    if (layout() != GM_PLUGIN_OK) return GM_PLUGIN_ESTATE;
+    width = (int32_t)ha.display_width;
+    root = ha.ui->root_get();
+    if (root == 0) return GM_PLUGIN_ESTATE;
+
+    ha.screen = ha.ui->obj_create(root);
+    if (ha.screen == 0) return GM_PLUGIN_ENOMEM;
+    ha.ui->obj_set_size(ha.screen, width, (int32_t)ha.display_height);
+    ha.ui->obj_align(ha.screen, GM_PLUGIN_LVGL_ALIGN_CENTER, 0, 0);
+    style_panel(ha.screen, 0x00, 0, 0);
+
+    ha.title_label = make_label(ha.screen, "", 0xF0, false);
+    if (ha.title_label == 0) return GM_PLUGIN_ENOMEM;
+    {
+        gm_plugin_lvgl_style_value_t font_value = {0};
+        font_value.ptr = ha.ui->font_large;
+        set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_FONT, font_value);
+    }
+    set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_ALIGN,
+              number(GM_PLUGIN_LVGL_TEXT_ALIGN_CENTER));
+    ha.ui->obj_set_size(ha.title_label, width - SCREEN_MARGIN * 2U,
+                         HEADER_HEIGHT);
+    ha.ui->obj_align(ha.title_label, GM_PLUGIN_LVGL_ALIGN_TOP_MID, 0, 6);
+
+    /* Navigation hints were removed at the wearer's request: the head gestures
+     * are discoverable on their own and the text crowded the rows. The label is
+     * kept (empty) so the layout stays unchanged. */
+    ha.hint_label = make_label(ha.screen, "", 0x70, false);
+    if (ha.hint_label == 0) return GM_PLUGIN_ENOMEM;
+    ha.ui->obj_set_size(ha.hint_label, width - SCREEN_MARGIN * 2U, HINT_HEIGHT);
+    ha.ui->obj_align(ha.hint_label, GM_PLUGIN_LVGL_ALIGN_BOTTOM_MID, 0, 0);
+    return GM_PLUGIN_OK;
+}
+
+/* Creates every row widget for the list view. */
+static gm_plugin_result_t build_rows(void)
+{
+    uint32_t row;
+    int32_t width = (int32_t)ha.display_width;
+
+    for (row = 0U; row < ha.visible_rows; row++) {
+        /* Absolute placement via obj_set_pos (top-left in logical pixels) keeps
+         * the rows inside the area below the header without depending on the
+         * alignment point's origin. Two fixed columns: label hugs the left
+         * margin, value stops before the right margin. Sizing both from a single
+         * split point guarantees a long label can never push the value off the
+         * screen; the label clips with "..." via LABEL_DOT. A background
+         * rectangle sits behind each row and is made opaque only for the
+         * selected row, drawing the selection cursor. */
+        int32_t top_y = HEADER_HEIGHT + SCREEN_MARGIN / 2
+            + (int32_t)row * ha.row_height;
+
+        /* The highlight rectangle is created first so the label text draws
+         * above the selected-row bar. */
+        ha.row_bg[row] = ha.ui->obj_create(ha.screen);
+        if (ha.row_bg[row] == 0) return GM_PLUGIN_ENOMEM;
+        ha.ui->obj_set_size(ha.row_bg[row], width - SCREEN_MARGIN - RIGHT_MARGIN,
+                             ha.row_height - 2);
+        ha.ui->obj_set_pos(ha.row_bg[row], SCREEN_MARGIN, top_y);
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0x38));
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_RADIUS, number(6));
+        /* No outline around the highlight: only a flat filled bar. */
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
+        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
+        ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+
+        /* Bitmap icon in its own column, behind the text so the selected-row
+         * bar still shows through around it. */
+        ha.row_icon[row] = ha.ui->image_create(ha.screen, &ha_icons_dsc[HA_ICON_FALLBACK]);
+        if (ha.row_icon[row] == 0) return GM_PLUGIN_ENOMEM;
+        ha.ui->obj_set_pos(ha.row_icon[row], ha.icon_x,
+                           top_y + (ha.row_height - 2 - (int32_t)HA_ICON_SIZE) / 2);
+        set_style(ha.row_icon[row], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
+
+        /* The label starts right of the icon column. */
+        ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
+        if (ha.row_label[row] == 0) return GM_PLUGIN_ENOMEM;
+        ha.ui->obj_set_size(ha.row_label[row], ha.label_width, ha.row_height - 2);
+        ha.ui->obj_set_pos(ha.row_label[row], ha.label_x, top_y);
+
+        ha.row_value[row] = make_label(ha.screen, "", 0xF0, false);
+        if (ha.row_value[row] == 0) return GM_PLUGIN_ENOMEM;
+        ha.ui->obj_set_size(ha.row_value[row], ha.value_width, ha.row_height - 2);
+        ha.ui->obj_set_pos(ha.row_value[row],
+                           width - RIGHT_MARGIN - ha.value_width, top_y);
+    }
+    return GM_PLUGIN_OK;
+}
+
+static void reset_widgets(void)
+{
+    uint32_t slot;
+    for (slot = 0U; slot < MAX_VISIBLE_ROWS; slot++) {
+        ha.row_bg[slot] = 0;
+        ha.row_icon[slot] = 0;
+        ha.row_label[slot] = 0;
+        ha.row_value[slot] = 0;
+    }
+    ha.screen = 0;
+    ha.title_label = 0;
+    ha.hint_label = 0;
+}
+
+/* Creates the full list view: panel, title, hint and every row. */
+static gm_plugin_result_t build_ui(void)
+{
+    gm_plugin_result_t result;
+    int32_t usable, gap;
+
+    reset_widgets();
+    result = build_frame();
+    if (result != GM_PLUGIN_OK) return result;
+
+    /* Split the usable width into a label column and a value column with a
+     * fixed gap between them. The value gets a fixed share so long numeric
+     * readings stay whole; the label takes the rest and truncates. The value
+     * column stops short of the right edge (RIGHT_MARGIN) so it never hugs the
+     * border. */
+    usable = (int32_t)ha.display_width - SCREEN_MARGIN - RIGHT_MARGIN;
+    gap = usable / 12;
+    ha.value_width = usable * 2 / 5;
+    ha.label_width = usable - ha.value_width - gap;
+    if (ha.label_width < 0) ha.label_width = 0;
+
+    /* A dedicated icon column holds the bitmap icon; the label starts after
+     * ICON_CELL so there is a clear gap between icon and name. */
+    ha.icon_x = SCREEN_MARGIN;
+    ha.label_x = SCREEN_MARGIN + ICON_CELL;
+    ha.label_width -= ICON_CELL;
+    if (ha.label_width < 0) ha.label_width = 0;
+    ha.host->log("homeassistant: icon_x=%d label_x=%d label_w=%d value_w=%d",
+                  (int)ha.icon_x, (int)ha.label_x, (int)ha.label_width,
+                  (int)ha.value_width);
+
+    return build_rows();
+}
+
+/* Card pictures are written by the phone straight to the framebuffer, so on an
+ * image page every widget must be fully transparent or absent. This overlay
+ * keeps only the title band (with the page index) above the picture. */
+static gm_plugin_result_t build_overlay(void)
+{
+    uint32_t slot;
+    gm_plugin_lvgl_obj_t *root;
+    int32_t width;
+
+    reset_widgets();
+    drop_remote_rects();
+    if (layout() != GM_PLUGIN_OK) return GM_PLUGIN_ESTATE;
+    width = (int32_t)ha.display_width;
+    root = ha.ui->root_get();
+    if (root == 0) return GM_PLUGIN_ESTATE;
+    if (build_frame() != GM_PLUGIN_OK) return GM_PLUGIN_ENOMEM;
+
+    /* The picture covers the title band; repaint it opaquely above. */
+    ha.ui->obj_clean(ha.title_label);
+    ha.title_label = make_label(root, "", 0xF0, false);
+    if (ha.title_label == 0) return GM_PLUGIN_ENOMEM;
+    layout_band_label();
+    if (ha.remote_rect_count == 0U)
+        add_remote_rect(0, 0, width, HEADER_HEIGHT);
+
+    /* Invisible widgets: they keep the list code at home but must show nothing
+     * over the picture. This waiting line lives in the bottom hint. */
+    for (slot = 0U; slot < ha.visible_rows; slot++) {
+        ha.row_bg[slot] = ha.ui->obj_create(root);
+        ha.row_icon[slot] = ha.ui->image_create(root, &ha_icons_dsc[HA_ICON_FALLBACK]);
+        ha.row_label[slot] = make_label(root, "", 0xD0, true);
+        ha.row_value[slot] = make_label(root, "", 0xF0, false);
+        if (ha.row_bg[slot] == 0 || ha.row_icon[slot] == 0 ||
+            ha.row_label[slot] == 0 || ha.row_value[slot] == 0)
+            return GM_PLUGIN_ENOMEM;
+        set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
+        set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
+        set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
+        set_style(ha.row_icon[slot], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
+        set_style(ha.row_label[slot], GM_PLUGIN_LVGL_STYLE_TEXT_OPA, number(0));
+        set_style(ha.row_value[slot], GM_PLUGIN_LVGL_STYLE_TEXT_OPA, number(0));
+    }
+    if (ha.hint_label == 0) return GM_PLUGIN_ENOMEM;
+    set_style(ha.hint_label, GM_PLUGIN_LVGL_STYLE_TEXT_OPA, number(0));
+    ha.ui->label_set_text(ha.hint_label, "");
+    return GM_PLUGIN_OK;
+}
+
+static void add_remote_rect(int32_t x, int32_t y, int32_t width, int32_t height)
+{
+    gm_plugin_lvgl_obj_t *root = ha.ui->root_get();
+    gm_plugin_lvgl_obj_t *rect;
+
+    if (root == 0) return;
+    if (ha.remote_rect_count >= MAX_VISIBLE_ROWS) return;
+    rect = ha.ui->obj_create(root);
+    if (rect == 0) return;
+    ha.remote_rect[ha.remote_rect_count++] = rect;
+    ha.ui->obj_set_pos(rect, x, y);
+    ha.ui->obj_set_size(rect, width, height);
+    set_style(rect, GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0x00));
+    set_style(rect, GM_PLUGIN_LVGL_STYLE_BG_OPA, number(255));
+    set_style(rect, GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
+    set_style(rect, GM_PLUGIN_LVGL_STYLE_RADIUS, number(0));
+    ha.ui->obj_clear_flag(rect, GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+}
+
+static void drop_remote_rects(void)
+{
+    uint32_t slot;
+    for (slot = 0U; slot < ha.remote_rect_count; slot++) {
+        if (ha.remote_rect[slot] != 0) ha.ui->obj_clean(ha.remote_rect[slot]);
+        ha.remote_rect[slot] = 0;
+    }
+    ha.remote_rect_count = 0U;
+}
+
+/* Card pictures land directly in the framebuffer and the widgets a picture
+ * covered stay erased, so every repaint of the band must restore them: the
+ * opaque rectangle that hides the pixels underneath, then the title label on
+ * top of it. The rectangle is created last so it also sits above the title:
+ * LVGL then never draws the text into its own layer, the band area picks up no
+ * static cursor, and the label's position is set explicitly right after the
+ * file-scope callback. A text redraw may still paint the label under the
+ * rectangle (one frame of latency, never a flicker). */
+static void repaint_above_image(void)
+{
+    gm_plugin_lvgl_obj_t *root = ha.ui->root_get();
+    gm_plugin_lvgl_obj_t *rect;
+    int32_t width = (int32_t)ha.display_width;
+
+    if (root == 0 || ha.title_label == 0) return;
+    if (ha.remote_rect_count == 0U) {
+        add_remote_rect(0, 0, width, HEADER_HEIGHT);
+        if (ha.remote_rect_count == 0U) return;
+    }
+    rect = ha.remote_rect[0];
+    if (rect == 0) return;
+    ha.ui->obj_set_pos(rect, 0, 0);
+    ha.ui->obj_set_size(rect, width, HEADER_HEIGHT);
+}
+
+static void layout_band_label(void)
+{
+    int32_t width = (int32_t)ha.display_width;
+
+    if (ha.title_label == 0) return;
+    ha.ui->obj_set_size(ha.title_label, width - SCREEN_MARGIN * 2U,
+                        HEADER_HEIGHT);
+    ha.ui->obj_align(ha.title_label, GM_PLUGIN_LVGL_ALIGN_TOP_MID, 0, 6);
+    set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_OPA, number(255));
+}
+
+/* A card picture was just written: only that page's title band is redrawn, and
+ * only while the plugin view still shows the picture's page. */
+static void on_image_presented(void)
+{
+    if (ha.screen != 0 || ha.page_count == 0U) return;
+    if (ha.image_page != ha.page_index) return;
+    ha.host->log("homeassistant: image presented page=%u",
+                  (unsigned int)ha.page_index);
+    repaint_above_image();
+}
+
 static void ensure_selection_visible(void)
 {
+    /* Image pages have no rows: there is nothing to scroll. */
+    if (ha.screen == 0) return;
     if (ha.selected < ha.scroll_offset) {
         ha.scroll_offset = ha.selected;
     } else if ((uint32_t)ha.selected >=
@@ -333,7 +617,7 @@ static void run_action(void)
 
     if (ha.page_count == 0U) return;
     page = &ha_pages[ha.page_index];
-    if (ha.selected >= page->row_count) return;
+    if (page->image || ha.selected >= page->row_count) return;
 
     action = page->rows[ha.selected].action;
     while (action[len] != '\0' && len < MAX_ACTION_BYTES) {
@@ -365,154 +649,35 @@ static void change_page(int32_t delta)
     ha.scroll_offset = 0U;
     ha.selected = 0U;
     refresh_page();
+    /* Landing on a picture page asks for its picture straight away: the
+     * wearer only nods again to refresh it. */
+    if (ha_pages[ha.page_index].image) request_card_image();
     payload[0] = PROTOCOL_VERSION;
     payload[1] = EVENT_PAGE_CHANGED;
     payload[2] = (uint8_t)(ha.page_index & 0xFFU);
     (void)ha.host->bt_send(EVENT_CHANNEL, payload, sizeof(payload));
 }
 
+
 static gm_plugin_result_t homeassistant_start(void *context)
 {
-    gm_plugin_display_info_t display;
-    gm_plugin_lvgl_obj_t *root;
     char locale[GM_PLUGIN_LOCALE_TAG_MAX];
-    int32_t rows_area_height;
-    uint32_t row;
 
     (void)context;
 
+    ha.remote_rect_count = 0U;
+    ha.connected = false;
+    ha.image_page = NO_PAGE;
+    ha.image_width = 0U;
+    ha.image_height = 0U;
+    ha.image_x = 0;
+    ha.image_y = 0;
     ha.language = 0U;
     if (ha.host->locale_get != 0 &&
         ha.host->locale_get(locale) == GM_PLUGIN_OK)
         ha.language = ha_detect_language(locale);
 
-    if (ha.host->display_get_info(&display) != GM_PLUGIN_OK ||
-        display.width <= SCREEN_MARGIN * 2U)
-        return GM_PLUGIN_ESTATE;
-
-    rows_area_height = (int32_t)display.height - HEADER_HEIGHT - HINT_HEIGHT
-                       - SCREEN_MARGIN;
-    /* Fit as many rows as the panel allows, capped by MAX_VISIBLE_ROWS. Rows
-     * beyond that stay in the page buffer and are reached by scrolling. Each
-     * drawn row is sized from this area so the window always fits between the
-     * header and the hint instead of overrunning the hint. */
-    ha.visible_rows = (uint8_t)(rows_area_height / ROW_MIN_HEIGHT);
-    if (ha.visible_rows > MAX_VISIBLE_ROWS) ha.visible_rows = MAX_VISIBLE_ROWS;
-    if (ha.visible_rows == 0U) return GM_PLUGIN_ESTATE;
-    ha.row_height = rows_area_height / (int32_t)ha.visible_rows;
-    if (ha.row_height < ROW_MIN_HEIGHT)
-        return GM_PLUGIN_ESTATE;
-    /* Rows fill rows_area_height exactly; anchor them just under the header. */
-    rows_area_height = (int32_t)ha.visible_rows * ha.row_height;
-
-    ha.host->log("homeassistant: display %ux%u visible_rows=%u row_height=%d area=%d",
-                  (unsigned int)display.width, (unsigned int)display.height,
-                  (unsigned int)ha.visible_rows, (int)ha.row_height,
-                  (int)rows_area_height);
-
-    /* Split the usable width into a label column and a value column with a
-     * fixed gap between them. The value gets a fixed share so long numeric
-     * readings stay whole; the label takes the rest and truncates. The value
-     * column stops short of the right edge (RIGHT_MARGIN) so it never hugs the
-     * border. */
-    {
-        int32_t usable = (int32_t)display.width - SCREEN_MARGIN - RIGHT_MARGIN;
-        int32_t gap = usable / 12;
-        ha.value_width = usable * 2 / 5;
-        ha.label_width = usable - ha.value_width - gap;
-        if (ha.label_width < 0) ha.label_width = 0;
-
-        /* A dedicated icon column holds the bitmap icon; the label starts after
-         * ICON_CELL so there is a clear gap between icon and name. */
-        ha.icon_x = SCREEN_MARGIN;
-        ha.label_x = SCREEN_MARGIN + ICON_CELL;
-        ha.label_width -= ICON_CELL;
-        if (ha.label_width < 0) ha.label_width = 0;
-        ha.host->log("homeassistant: icon_x=%d label_x=%d label_w=%d value_w=%d",
-                      (int)ha.icon_x, (int)ha.label_x, (int)ha.label_width,
-                      (int)ha.value_width);
-    }
-
-    root = ha.ui->root_get();
-    if (root == 0) return GM_PLUGIN_ESTATE;
-    ha.ui->obj_clean(root);
-
-    ha.screen = ha.ui->obj_create(root);
-    if (ha.screen == 0) return GM_PLUGIN_ENOMEM;
-    ha.ui->obj_set_size(ha.screen, display.width, display.height);
-    ha.ui->obj_align(ha.screen, GM_PLUGIN_LVGL_ALIGN_CENTER, 0, 0);
-    style_panel(ha.screen, 0x00, 0, 0);
-
-    ha.title_label = make_label(ha.screen, "", 0xF0, false);
-    if (ha.title_label == 0) goto no_memory;
-    {
-        gm_plugin_lvgl_style_value_t font_value = {0};
-        font_value.ptr = ha.ui->font_large;
-        set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_FONT, font_value);
-    }
-    set_style(ha.title_label, GM_PLUGIN_LVGL_STYLE_TEXT_ALIGN,
-              number(GM_PLUGIN_LVGL_TEXT_ALIGN_CENTER));
-    ha.ui->obj_set_size(ha.title_label, display.width - SCREEN_MARGIN * 2U,
-                         HEADER_HEIGHT);
-    ha.ui->obj_align(ha.title_label, GM_PLUGIN_LVGL_ALIGN_TOP_MID, 0, 6);
-
-    for (row = 0U; row < ha.visible_rows; row++) {
-        /* Absolute placement via obj_set_pos (top-left in logical pixels) keeps
-         * the rows inside the area below the header without depending on the
-         * alignment point's origin. Two fixed columns: label hugs the left
-         * margin, value stops before the right margin. Sizing both from a single
-         * split point guarantees a long label can never push the value off the
-         * screen; the label clips with "..." via LABEL_DOT. A background
-         * rectangle sits behind each row and is made opaque only for the
-         * selected row, drawing the selection cursor. */
-        int32_t top_y = HEADER_HEIGHT + SCREEN_MARGIN / 2
-            + (int32_t)row * ha.row_height;
-
-        /* The highlight rectangle is created first so the label text draws
-         * above the selected-row bar. */
-        ha.row_bg[row] = ha.ui->obj_create(ha.screen);
-        if (ha.row_bg[row] == 0) goto no_memory;
-        ha.ui->obj_set_size(ha.row_bg[row],
-                             (int32_t)display.width - SCREEN_MARGIN - RIGHT_MARGIN,
-                             ha.row_height - 2);
-        ha.ui->obj_set_pos(ha.row_bg[row], SCREEN_MARGIN, top_y);
-        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_COLOR, color(0x38));
-        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
-        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_RADIUS, number(6));
-        /* No outline around the highlight: only a flat filled bar. */
-        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_WIDTH, number(0));
-        set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
-        ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
-
-        /* Bitmap icon in its own column, behind the text so the selected-row
-         * bar still shows through around it. */
-        ha.row_icon[row] = ha.ui->image_create(ha.screen, &ha_icons_dsc[HA_ICON_FALLBACK]);
-        if (ha.row_icon[row] == 0) goto no_memory;
-        ha.ui->obj_set_pos(ha.row_icon[row], ha.icon_x,
-                           top_y + (ha.row_height - 2 - (int32_t)HA_ICON_SIZE) / 2);
-        set_style(ha.row_icon[row], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
-
-        /* The label starts right of the icon column. */
-        ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
-        if (ha.row_label[row] == 0) goto no_memory;
-        ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
-                             ha.row_height - 2);
-        ha.ui->obj_set_pos(ha.row_label[row], ha.label_x, top_y);
-
-        ha.row_value[row] = make_label(ha.screen, "", 0xF0, false);
-        if (ha.row_value[row] == 0) goto no_memory;
-        ha.ui->obj_set_size(ha.row_value[row], ha.value_width,
-                             ha.row_height - 2);
-        ha.ui->obj_set_pos(ha.row_value[row],
-                           (int32_t)display.width - RIGHT_MARGIN - ha.value_width,
-                           top_y);
-    }
-
-    ha.hint_label = make_label(ha.screen, "", 0x70, false);
-    if (ha.hint_label == 0) goto no_memory;
-    ha.ui->obj_set_size(ha.hint_label, display.width - SCREEN_MARGIN * 2U,
-                         HINT_HEIGHT);
-    ha.ui->obj_align(ha.hint_label, GM_PLUGIN_LVGL_ALIGN_BOTTOM_MID, 0, 0);
+    if (build_ui() != GM_PLUGIN_OK) return GM_PLUGIN_ENOMEM;
 
     ha.page_count = 0U;
     ha.page_index = 0U;
@@ -521,33 +686,145 @@ static gm_plugin_result_t homeassistant_start(void *context)
     refresh_page();
 
     if (ha.host->imu_enable(GM_PLUGIN_IMU_ENABLE_GESTURES) != GM_PLUGIN_OK)
-        goto no_memory;
+        return GM_PLUGIN_ENOMEM;
     return GM_PLUGIN_OK;
-
-no_memory:
-    ha.ui->obj_clean(root);
-    ha.screen = 0;
-    ha.title_label = 0;
-    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
-        ha.row_bg[row] = 0;
-        ha.row_icon[row] = 0;
-        ha.row_label[row] = 0;
-        ha.row_value[row] = 0;
-    }
-    ha.hint_label = 0;
-    return GM_PLUGIN_ENOMEM;
 }
 
-/* Parses a full page set pushed by the phone:
- * [version, cmd, page_count(2),
- *   { title_len, title,
- *     row_count(2),
- *     { icon_id, label_len, label, value_len, value, action_len, action }
- *       * row_count } * page_count ]
- * icon_id indexes ha_icons[], or NO_ICON. */
+/* Renders the current page: title with an "i/n" position marker, the visible
+ * slice of label/value rows starting at scroll_offset, and a navigation hint.
+ * Rows past the page's row_count are blanked so a shorter page never shows
+ * stale entries. An image page is drawn by the phone instead: this function
+ * only keeps the title and, until the picture arrives, one hint line. */
+static void refresh_page(void)
+{
+    char title[64];
+    char row_text[MAX_LABEL_BYTES + 4U];
+    uint32_t slot;
+
+    if (ha.page_count == 0U) {
+        if (ha.screen == 0 && build_ui() != GM_PLUGIN_OK) return;
+        ha.ui->label_set_text(ha.title_label,
+            L("Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant", "Home Assistant"));
+        for (slot = 0U; slot < ha.visible_rows; slot++) {
+            ha.ui->label_set_text(ha.row_label[slot], "");
+            ha.ui->label_set_text(ha.row_value[slot], "");
+            hide_row_icon(slot);
+            set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
+        }
+        ha.ui->label_set_text(ha.hint_label,
+            L("En attente du telephone...", "Waiting for the phone...", "Esperando al teléfono...", "In attesa del telefono...", "Warte auf das Telefon...", "正在等待手机..."));
+        ha.image_page = NO_PAGE;
+        return;
+    }
+
+    {
+        const ha_page_t *page = &ha_pages[ha.page_index];
+        uint16_t total_rows = page->row_count;
+        uint16_t max_offset;
+        uint32_t pos = (uint32_t)(ha.page_index + 1U);
+        uint32_t total = (uint32_t)ha.page_count;
+        int written = 0;
+        const char *src = page->title;
+
+        /* The list may have been cleared by a previous picture: rebuild it
+         * before touching the row widgets. */
+        if (page->image) {
+            if (ha.image_page == ha.page_index && ha.screen == 0) return;
+            if (ha.image_page != ha.page_index && build_ui() != GM_PLUGIN_OK) return;
+        } else if (ha.screen == 0) {
+            ha.image_page = NO_PAGE;
+            ha.image_width = 0U;
+            ha.image_height = 0U;
+            if (build_ui() != GM_PLUGIN_OK) return;
+        }
+
+        /* Keep the window inside the page after a refresh that shortened it. */
+        max_offset = (total_rows > ha.visible_rows)
+            ? (uint16_t)(total_rows - ha.visible_rows) : 0U;
+        if (ha.scroll_offset > max_offset) ha.scroll_offset = max_offset;
+
+        /* Title then "i/n" appended manually to avoid snprintf dependency. */
+        while (*src != '\0' && written < 48) title[written++] = *src++;
+        title[written++] = ' ';
+        title[written++] = ' ';
+        if (pos >= 10U) title[written++] = (char)('0' + (pos / 10U) % 10U);
+        title[written++] = (char)('0' + pos % 10U);
+        title[written++] = '/';
+        if (total >= 10U) title[written++] = (char)('0' + (total / 10U) % 10U);
+        title[written++] = (char)('0' + total % 10U);
+        /* Scroll position marker when the page overflows the screen. */
+        if (total_rows > ha.visible_rows) {
+            uint16_t last = (uint16_t)(ha.scroll_offset + ha.visible_rows);
+            title[written++] = ' ';
+            if (last >= 10U) title[written++] = (char)('0' + (last / 10U) % 10U);
+            title[written++] = (char)('0' + last % 10U);
+            title[written++] = '/';
+            if (total_rows >= 10U) title[written++] = (char)('0' + (total_rows / 10U) % 10U);
+            title[written++] = (char)('0' + total_rows % 10U);
+        }
+        title[written] = '\0';
+        ha.ui->label_set_text(ha.title_label, title);
+
+        if (page->image) {
+            /* The picture is written by the phone straight to the framebuffer;
+             * our rows would cover it. Once it landed, take the list away and
+             * keep only the title band. Until then, one hint line explains how
+             * to load it. */
+            blank_rows();
+            if (ha.image_page == ha.page_index) {
+                if (build_overlay() != GM_PLUGIN_OK) return;
+                ha.ui->label_set_text(ha.title_label, title);
+            } else {
+                ha.ui->label_set_text(ha.hint_label, "");
+                show_message(0U,
+                    L("Inclinez la tete vers le bas pour charger l'image.",
+                      "Nod down to load the picture.",
+                      "Inclina la cabeza hacia abajo para cargar la imagen.",
+                      "Inclina la testa verso il basso per caricare l'immagine.",
+                      "Kopf nach unten neigen, um das Bild zu laden.",
+                      "向下点头以加载图像。"));
+            }
+            return;
+        }
+
+        /* A row page took the screen back from a picture. */
+        if (ha.image_page != NO_PAGE) {
+            ha.image_page = NO_PAGE;
+            ha.image_width = 0U;
+            ha.image_height = 0U;
+        }
+
+        for (slot = 0U; slot < ha.visible_rows; slot++) {
+            uint32_t row = (uint32_t)ha.scroll_offset + slot;
+            bool is_selected = (row < page->row_count) && ((uint16_t)row == ha.selected);
+            if (row < page->row_count) {
+                fill_row_text(row_text, sizeof(row_text),
+                              page->rows[row].label);
+                ha.ui->label_set_text(ha.row_label[slot], row_text);
+                ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
+                show_row_icon(slot, page->rows[row].icon);
+            } else {
+                ha.ui->label_set_text(ha.row_label[slot], "");
+                ha.ui->label_set_text(ha.row_value[slot], "");
+                hide_row_icon(slot);
+            }
+            /* Highlight the selected row; the others keep a transparent
+             * background so the highlight follows the cursor. */
+            set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA,
+                      number(is_selected ? 255 : 0));
+        }
+
+        /* Navigation hints were removed at the wearer's request: the head
+         * gestures are discoverable on their own and the text crowded the
+         * rows. The label is kept (empty) so the layout stays unchanged. */
+        ha.ui->label_set_text(ha.hint_label, "");
+    }
+}
+
 static void handle_set_pages(const uint8_t *data, uint32_t length)
 {
     uint32_t offset;
+    uint32_t flags_offset;
     uint16_t requested_pages;
     uint16_t p;
 
@@ -566,6 +843,7 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
     requested_pages = read_u16(&data[2]);
     if (requested_pages > MAX_PAGES) requested_pages = MAX_PAGES;
 
+    flags_offset = NO_OFFSET;
     offset = 4U;
     for (p = 0U; p < requested_pages; p++) {
         ha_page_t *page = &ha_pages[p];
@@ -613,8 +891,17 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
             offset += action_len;
         }
         page->row_count = (uint8_t)r;
+        page->image = false;
     }
     ha.page_count = p;
+    /* Trailer: exactly one flag byte per page, right at the end. */
+    if (p == requested_pages && length >= offset &&
+        length - offset == (uint32_t)requested_pages)
+        flags_offset = offset;
+    for (p = 0U; p < ha.page_count; p++) {
+        if (flags_offset != NO_OFFSET && data[flags_offset + p] == 1U)
+            ha_pages[p].image = true;
+    }
     if (ha.page_index >= ha.page_count) ha.page_index = 0U;
     ha.scroll_offset = 0U;
     ha.selected = 0U;
@@ -638,12 +925,21 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
     if (event->type == GM_PLUGIN_EVENT_CONNECTION) {
         ha.host->log("homeassistant: phone connected=%u",
                       (unsigned int)event->data.connection.connected);
+        ha.connected = event->data.connection.connected;
+        if (ha.connected && ha.page_count != 0U) refresh_page();
         return true;
     }
 
     if (event->type == GM_PLUGIN_EVENT_BT_MESSAGE) {
-        if (event->data.bt.channel != PAGES_CHANNEL || event->data.bt.data == 0)
-            return false;
+        if (event->data.bt.data == 0) return false;
+        /* Pictures travel on the display channels, which the Host applies
+         * itself (and drops when a plugin page is not visible). The plugin is
+         * told once the pixels are in the framebuffer so it can keep the title
+         * band above them; its own message channel keeps carrying the pages. */
+        if (event->data.bt.channel != PAGES_CHANNEL) {
+            on_image_presented();
+            return true;
+        }
         handle_set_pages(event->data.bt.data, event->data.bt.length);
         return true;
     }
@@ -653,6 +949,12 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
     if (event->type == GM_PLUGIN_EVENT_BUTTON &&
         event->data.button.button == GM_PLUGIN_BUTTON_PRIMARY &&
         event->data.button.action == GM_PLUGIN_BUTTON_ACTION_SINGLE) {
+        if (ha_pages[ha.page_index].image) {
+            ha.image_page = NO_PAGE;
+            request_card_image();
+            refresh_page();
+            return true;
+        }
         run_action();
         return true;
     }
@@ -678,6 +980,14 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
             move_selection(-1);
             return true;
         case GM_PLUGIN_IMU_GESTURE_HEAD_LOWER:
+            if (ha_pages[ha.page_index].image) {
+                /* Image pages have no rows; a nod fetches (or refreshes) the
+                 * card picture instead of moving a cursor. */
+                ha.image_page = NO_PAGE;
+                request_card_image();
+                refresh_page();
+                return true;
+            }
             move_selection(1);
             return true;
         default:
@@ -695,6 +1005,9 @@ static void homeassistant_stop(void *context)
     root = ha.ui->root_get();
     (void)ha.host->imu_enable(GM_PLUGIN_IMU_ENABLE_NONE);
     if (root != 0) ha.ui->obj_clean(root);
+    ha.image_page = NO_PAGE;
+    ha.image_width = 0U;
+    ha.image_height = 0U;
     ha.screen = 0;
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
