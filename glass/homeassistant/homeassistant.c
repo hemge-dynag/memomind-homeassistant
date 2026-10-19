@@ -47,8 +47,9 @@
 #define HA_ICON_COUNT 40U
 /* Glyph used when a row has no usable icon id (text-box). */
 #define HA_ICON_FALLBACK (HA_ICON_COUNT - 1U)
-/* Width of the icon column holding the bitmap icon. */
-#define ICON_CELL 20
+/* Width of the icon column, including the gap that separates the 16 px bitmap
+ * from the entity name. */
+#define ICON_CELL 34
 
 /* version(1) + command(1) + page_count(2) */
 #define MIN_SET_PAGES_PAYLOAD 4U
@@ -160,31 +161,9 @@ static gm_plugin_lvgl_obj_t *make_label(gm_plugin_lvgl_obj_t *parent,
     return label;
 }
 
-/* One printable stand-in per icon id. The image API turned out to be a dead
- * end on the fielded panel (no bitmap ever reached the screen, whether or not
- * image_set_source() reported success), so the row's icon is a plain text
- * glyph prepended to the label, always drawn left of the entity name. Plain
- * ASCII keeps the 16x16 cell readable in the monochrome GRAY_4 font. */
-static char row_icon_glyph(uint8_t icon)
-{
-    /* Order follows the phone's ICON_NAMES. '*' would be invisible in a
-     * bitmap font, so camera uses 'K' and the unused placeholders stay plain
-     * letters. */
-    static const char kGlyphs[HA_ICON_COUNT] = {
-        'L', '=', 'P', 'T', 'W', 'D', 'N', 'F',
-        'V', 'S', 'K', 'G', 'B', 'E', 'C', 'O',
-        'w', 'b', 'M', 'U', 'Z', 'R', 'k', 'r',
-        'c', 'a', 'A', 'i', 'H', 'x', 'h', 'Q',
-        'q', '!', 'j', 'n', 'Y', '+', 'l', 't'
-    };
-    if (icon >= HA_ICON_COUNT) icon = HA_ICON_FALLBACK;
-    return kGlyphs[icon];
-}
-
 /* Keeps the bitmap icon of one row in sync with its wire icon id. The image
  * sits in the dedicated icon column, left of the text. It is only drawn when
- * the host actually renders images; the letter glyph in the label stays as the
- * guaranteed fallback. */
+ * the host can create/update bitmap images. */
 static void show_row_icon(uint32_t slot, uint8_t icon)
 {
     const gm_plugin_lvgl_image_dsc_t *dsc;
@@ -214,14 +193,12 @@ static uint16_t read_u16(const uint8_t *data)
     return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
 }
 
-/* Builds the label shown for one row: the icon glyph, a space, then the
- * entity name. Every row carries a glyph, so the column stays aligned. */
-static void fill_row_text(char *out, size_t capacity, uint8_t icon,
-                          const char *label)
+/* Builds the label shown for one row: just the entity name. The bitmap icon
+ * lives in its own column to the left, so the text starts after a gap and never
+ * crowds it. */
+static void fill_row_text(char *out, size_t capacity, const char *label)
 {
     size_t used = 0U;
-    out[used++] = row_icon_glyph(icon);
-    out[used++] = ' ';
     while (label[0] != '\0' && used + 1U < capacity) out[used++] = *label++;
     out[used] = '\0';
 }
@@ -291,7 +268,7 @@ static void refresh_page(void)
             bool is_selected = (row < page->row_count) && ((uint16_t)row == ha.selected);
             if (row < page->row_count) {
                 fill_row_text(row_text, sizeof(row_text),
-                              page->rows[row].icon, page->rows[row].label);
+                              page->rows[row].label);
                 ha.ui->label_set_text(ha.row_label[slot], row_text);
                 ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
                 show_row_icon(slot, page->rows[row].icon);
@@ -445,8 +422,8 @@ static gm_plugin_result_t homeassistant_start(void *context)
         ha.label_width = usable - ha.value_width - gap;
         if (ha.label_width < 0) ha.label_width = 0;
 
-        /* A dedicated icon column holds the bitmap icon; the letter glyph that
-         * prefixes the label text stays as the guaranteed fallback. */
+        /* A dedicated icon column holds the bitmap icon; the label starts after
+         * ICON_CELL so there is a clear gap between icon and name. */
         ha.icon_x = SCREEN_MARGIN;
         ha.label_x = SCREEN_MARGIN + ICON_CELL;
         ha.label_width -= ICON_CELL;
@@ -515,9 +492,7 @@ static gm_plugin_result_t homeassistant_start(void *context)
                            top_y + (ha.row_height - 2 - (int32_t)HA_ICON_SIZE) / 2);
         set_style(ha.row_icon[row], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
 
-        /* The label starts right of the icon column and its text is prefixed
-         * with the letter glyph, so an icon is always visible even if the host
-         * does not render bitmaps. */
+        /* The label starts right of the icon column. */
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
         if (ha.row_label[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
@@ -650,9 +625,8 @@ static void handle_set_pages(const uint8_t *data, uint32_t length)
     /* First icon ids of page 0, to tell a phone that sends no icon (ff) from
      * an unexpected id. */
     for (p = 0U; p < 4U && p < ha_pages[0].row_count; p++)
-        ha.host->log("homeassistant: row%u icon=%u glyph=%c",
-                      (unsigned int)p, (unsigned int)ha_pages[0].rows[p].icon,
-                      row_icon_glyph(ha_pages[0].rows[p].icon));
+        ha.host->log("homeassistant: row%u icon=%u",
+                      (unsigned int)p, (unsigned int)ha_pages[0].rows[p].icon);
     refresh_page();
 }
 
