@@ -130,27 +130,12 @@ export async function presentGray4(gm, frame, width, height) {
   if (tiles.length === 0) return 0;
 
   if (tiles.length > 1) {
-    const frameId = nextFrameId();
     try {
-      await gm.display.beginFrame({ frameId, tileCount: tiles.length });
-      for (let index = 0; index < tiles.length; index += 1) {
-        const tile = tiles[index];
-        const compressed = lz4CompressBlock(tile.bytes);
-        await gm.display.updateFrameImageLz4({
-          frameId,
-          tileIndex: index,
-          x: tile.x,
-          y: tile.y,
-          width: tile.width,
-          height: tile.height,
-          stride: tile.stride,
-          decodedSize: tile.bytes.length,
-          dataBase64: bytesToBase64(compressed),
-        });
-      }
+      await presentFrame(gm, tiles);
       return tiles.length;
     } catch (error) {
-      if (!['METHOD_NOT_FOUND', 'CAPABILITY_UNAVAILABLE'].includes(error?.code)) throw error;
+      // An incomplete frame is discarded by the firmware, so the raw fallback
+      // below always repaints the whole picture. Never leave a black page.
     }
   }
 
@@ -165,6 +150,29 @@ export async function presentGray4(gm, frame, width, height) {
     });
   }
   return tiles.length;
+}
+
+// Atomic multi-tile frame. The host waits for a device acknowledgement after
+// the Begin and after every tile, so a slow picture transfer surfaces as a
+// frame ACK timeout; the caller falls back to raw tiles in that case.
+async function presentFrame(gm, tiles) {
+  const frameId = nextFrameId();
+  await gm.display.beginFrame({ frameId, tileCount: tiles.length });
+  for (let index = 0; index < tiles.length; index += 1) {
+    const tile = tiles[index];
+    const compressed = lz4CompressBlock(tile.bytes);
+    await gm.display.updateFrameImageLz4({
+      frameId,
+      tileIndex: index,
+      x: tile.x,
+      y: tile.y,
+      width: tile.width,
+      height: tile.height,
+      stride: tile.stride,
+      decodedSize: tile.bytes.length,
+      dataBase64: bytesToBase64(compressed),
+    });
+  }
 }
 
 let frameCounter = 1;

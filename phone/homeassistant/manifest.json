@@ -1,23 +1,55 @@
 {
   "id": "com.dynag.homeassistant.phone",
   "name": "GM Home Assistant",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "entry": "index.html",
   "bridgeVersion": "2.0",
   "permissions": [
-    { "name": "storage", "required": true },
-    { "name": "network", "required": true },
-    { "name": "device.info", "required": true },
-    { "name": "device.messaging", "required": true, "scope": { "channels": [18497, 18515] } },
-    { "name": "device.events", "required": true, "scope": { "types": ["connection"] } },
-    { "name": "display", "required": true }
+    {
+      "name": "storage",
+      "required": true
+    },
+    {
+      "name": "network",
+      "required": true
+    },
+    {
+      "name": "device.info",
+      "required": true
+    },
+    {
+      "name": "device.messaging",
+      "required": true,
+      "scope": {
+        "channels": [
+          18497,
+          18515
+        ]
+      }
+    },
+    {
+      "name": "device.events",
+      "required": true,
+      "scope": {
+        "types": [
+          "connection"
+        ]
+      }
+    },
+    {
+      "name": "display",
+      "required": true
+    }
   ],
   "deviceRequirements": {
     "preferredPluginId": "com.dynag.homeassistant.glass",
     "requiredPluginId": "com.dynag.homeassistant.glass",
     "minPluginVersion": "18",
     "protocols": [
-      { "id": "gm.homeassistant", "minVersion": "2.0" }
+      {
+        "id": "gm.homeassistant",
+        "minVersion": "2.0"
+      }
     ]
   },
   "schemaVersion": 2,
