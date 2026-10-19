@@ -81,7 +81,8 @@ typedef struct {
     gm_plugin_lvgl_obj_t *screen;
     gm_plugin_lvgl_obj_t *title_label;
     gm_plugin_lvgl_obj_t *row_bg[MAX_VISIBLE_ROWS]; /* selection highlight */
-    gm_plugin_lvgl_obj_t *row_icon[MAX_VISIBLE_ROWS]; /* 16x16 glyph, or 0 */
+    gm_plugin_lvgl_obj_t *row_icon[MAX_VISIBLE_ROWS]; /* 16x16 bitmap, or 0 */
+    gm_plugin_lvgl_obj_t *row_icon_text[MAX_VISIBLE_ROWS]; /* glyph letter */
     gm_plugin_lvgl_obj_t *row_label[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *row_value[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *hint_label;
@@ -159,6 +160,23 @@ static gm_plugin_lvgl_obj_t *make_label(gm_plugin_lvgl_obj_t *parent,
     return label;
 }
 
+/* One printable stand-in per icon id, used alongside the indexed bitmap: the
+ * Host does not render these image objects on the fielded panel, so a glyph
+ * label drawn on top of the slot keeps the icon column readable. Plain ASCII
+ * always exists in the monochrome GRAY_4 font. */
+static const char *row_icon_glyph(uint8_t icon)
+{
+    static const char kGlyphs[HA_ICON_COUNT][2] = {
+        "o", "=", "P", "T", "W", "D", "N", "F",
+        "V", "S", "L", "G", "B", "E", "*", "C",
+        "w", "b", "@", "u", "z", "R", "k", "r",
+        "c", "a", "M", "i", "#", "s", "h", "Q",
+        "x", "!", "A", "n", "H", "+", "l", "t"
+    };
+    if (icon >= HA_ICON_COUNT) icon = HA_ICON_FALLBACK;
+    return kGlyphs[icon];
+}
+
 static uint16_t read_u16(const uint8_t *data)
 {
     return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
@@ -190,19 +208,27 @@ static void show_row_icon(uint32_t slot, uint8_t icon)
         hide_row_icon(slot);
         return;
     }
+    /* The bitmap stays the preferred rendering, but the letter label sits on
+     * top of the slot so the row always shows something recognisable. */
     result = ha.ui->image_set_source(ha.row_icon[slot], dsc);
     if (result != GM_PLUGIN_OK) {
         ha.host->log("homeassistant: icon set_source slot=%u id=%u rc=%d",
                       (unsigned int)slot, (unsigned int)icon, (int)result);
-        return;
+        ha.ui->obj_add_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+    } else {
+        ha.ui->obj_clear_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+        /* Geometry is taken from the descriptor's bitmap, but some Host build
+         * leaves an image created without an explicit size at zero extent,
+         * which draws nothing. Sizing it here is harmless when the Host
+         * already derived it. */
+        ha.ui->obj_set_size(ha.row_icon[slot], dsc->width, dsc->height);
+        ha.ui->obj_invalidate(ha.row_icon[slot]);
     }
-    ha.ui->obj_clear_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
-    /* Geometry is taken from the descriptor's bitmap, but some Host build
-     * leaves an image created without an explicit size at zero extent, which
-     * draws nothing. Sizing it here matches the glyph and is harmless when the
-     * Host already derived it. */
-    ha.ui->obj_set_size(ha.row_icon[slot], dsc->width, dsc->height);
-    ha.ui->obj_invalidate(ha.row_icon[slot]);
+    if (ha.row_icon_text[slot] != 0) {
+        ha.ui->label_set_text(ha.row_icon_text[slot], row_icon_glyph(icon));
+        ha.ui->obj_clear_flag(ha.row_icon_text[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+        ha.ui->obj_invalidate(ha.row_icon_text[slot]);
+    }
 }
 
 /* Empties the icon slot so a text-only row leaves no stale glyph behind. */
@@ -210,6 +236,8 @@ static void hide_row_icon(uint32_t slot)
 {
     if (slot >= ha.visible_rows || ha.row_icon[slot] == 0) return;
     ha.ui->obj_add_flag(ha.row_icon[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+    if (ha.row_icon_text[slot] != 0)
+        ha.ui->obj_add_flag(ha.row_icon_text[slot], GM_PLUGIN_LVGL_FLAG_HIDDEN);
 }
 
 /* Renders the current page: title with an "i/n" position marker, the visible
@@ -434,7 +462,9 @@ static gm_plugin_result_t homeassistant_start(void *context)
          * text only (no image objects are created for them). */
         ha.label_x = SCREEN_MARGIN;
         ha.icon_column = 0;
-        if (ha.row_height - 2 >= ICON_CELL && ha.label_width > ICON_CELL + ICON_GAP + 16) {
+        /* The letter fallback is only ~10 px wide and fits even the shortest
+         * rows, so the column is carved out whenever the width allows it. */
+        if (ha.row_height - 2 >= 12 && ha.label_width > ICON_CELL + ICON_GAP + 16) {
             ha.icon_column = 1;
             ha.label_x = SCREEN_MARGIN + ICON_CELL + ICON_GAP;
             ha.label_width -= ICON_CELL + ICON_GAP;
@@ -503,6 +533,27 @@ static gm_plugin_result_t homeassistant_start(void *context)
                                top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
             ha.ui->obj_add_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
             ha.ui->obj_clear_flag(ha.row_icon[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
+            /* Created after the bitmap so it draws on top of it. */
+            ha.row_icon_text[row] = ha.ui->label_create(ha.screen);
+            if (ha.row_icon_text[row] == 0) goto no_memory;
+            ha.ui->label_set_long_mode(ha.row_icon_text[row],
+                                        GM_PLUGIN_LVGL_LABEL_CLIP);
+            set_style(ha.row_icon_text[row], GM_PLUGIN_LVGL_STYLE_TEXT_COLOR,
+                      color(0xF0));
+            set_style(ha.row_icon_text[row], GM_PLUGIN_LVGL_STYLE_TEXT_ALIGN,
+                      number(GM_PLUGIN_LVGL_TEXT_ALIGN_CENTER));
+            {
+                gm_plugin_lvgl_style_value_t glyph_font = {0};
+                glyph_font.ptr = ha.ui->font_large;
+                set_style(ha.row_icon_text[row], GM_PLUGIN_LVGL_STYLE_TEXT_FONT,
+                          glyph_font);
+            }
+            ha.ui->obj_set_size(ha.row_icon_text[row], ICON_CELL, ICON_CELL);
+            ha.ui->obj_set_pos(ha.row_icon_text[row], SCREEN_MARGIN,
+                               top_y + ((ha.row_height - 2) - ICON_CELL) / 2);
+            ha.ui->obj_add_flag(ha.row_icon_text[row], GM_PLUGIN_LVGL_FLAG_HIDDEN);
+            ha.ui->obj_clear_flag(ha.row_icon_text[row],
+                                   GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
         }
 
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
@@ -530,7 +581,10 @@ static gm_plugin_result_t homeassistant_start(void *context)
     ha.page_index = 0U;
     ha.scroll_offset = 0U;
     ha.selected = 0U;
-    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) ha.row_icon[row] = 0;
+    for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
+        ha.row_icon[row] = 0;
+        ha.row_icon_text[row] = 0;
+    }
     refresh_page();
 
     if (ha.host->imu_enable(GM_PLUGIN_IMU_ENABLE_GESTURES) != GM_PLUGIN_OK)
@@ -544,6 +598,7 @@ no_memory:
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_bg[row] = 0;
         ha.row_icon[row] = 0;
+        ha.row_icon_text[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -714,6 +769,7 @@ static void homeassistant_stop(void *context)
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_bg[row] = 0;
         ha.row_icon[row] = 0;
+        ha.row_icon_text[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
