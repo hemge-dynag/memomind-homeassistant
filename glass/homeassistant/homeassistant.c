@@ -1,5 +1,6 @@
 #include "gm_plugin_lvgl_api.h"
 #include "gm_plugin_libc.h"
+#include "ha_icons.h"
 
 /* Paired with PhoneSDK/examples/homeassistant. The phone connects to a Home
  * Assistant instance, fetches entities grouped into dashboard pages, and pushes
@@ -46,6 +47,8 @@
 #define HA_ICON_COUNT 40U
 /* Glyph used when a row has no usable icon id (text-box). */
 #define HA_ICON_FALLBACK (HA_ICON_COUNT - 1U)
+/* Width of the icon column holding the bitmap icon. */
+#define ICON_CELL 20
 
 /* version(1) + command(1) + page_count(2) */
 #define MIN_SET_PAGES_PAYLOAD 4U
@@ -78,6 +81,7 @@ typedef struct {
     gm_plugin_lvgl_obj_t *screen;
     gm_plugin_lvgl_obj_t *title_label;
     gm_plugin_lvgl_obj_t *row_bg[MAX_VISIBLE_ROWS]; /* selection highlight */
+    gm_plugin_lvgl_obj_t *row_icon[MAX_VISIBLE_ROWS]; /* bitmap icon left of the text */
     gm_plugin_lvgl_obj_t *row_label[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *row_value[MAX_VISIBLE_ROWS];
     gm_plugin_lvgl_obj_t *hint_label;
@@ -87,7 +91,9 @@ typedef struct {
     uint16_t selected;      /* selected row index within the page */
     uint8_t visible_rows;   /* rows that fit on screen */
     int32_t row_height;
+    int32_t icon_x;         /* left edge of the bitmap icon column */
     int32_t label_width;    /* label column width (left-aligned) */
+    bool images_ok;         /* host can create/update bitmap images */
     int32_t label_x;        /* left edge of the label text */
     int32_t value_width;    /* value column width (right-aligned) */
     uint8_t language; /* 0=fr 1=en 2=es 3=it 4=de 5=zh-CN */
@@ -175,6 +181,34 @@ static char row_icon_glyph(uint8_t icon)
     return kGlyphs[icon];
 }
 
+/* Keeps the bitmap icon of one row in sync with its wire icon id. The image
+ * sits in the dedicated icon column, left of the text. It is only drawn when
+ * the host actually renders images; the letter glyph in the label stays as the
+ * guaranteed fallback. */
+static void show_row_icon(uint32_t slot, uint8_t icon)
+{
+    const gm_plugin_lvgl_image_dsc_t *dsc;
+
+    if (ha.row_icon[slot] == 0) return;
+    if (icon == NO_ICON) icon = HA_ICON_FALLBACK;
+    if (icon >= HA_ICON_COUNT) icon = HA_ICON_FALLBACK;
+    dsc = &ha_icons_dsc[icon];
+    (void)ha.ui->image_set_source(ha.row_icon[slot], dsc);
+    if (!ha.images_ok) {
+        set_style(ha.row_icon[slot], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
+        return;
+    }
+    set_style(ha.row_icon[slot], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(255));
+    ha.ui->obj_set_size(ha.row_icon[slot], (int32_t)dsc->width,
+                         (int32_t)dsc->height);
+}
+
+static void hide_row_icon(uint32_t slot)
+{
+    if (ha.row_icon[slot] == 0) return;
+    set_style(ha.row_icon[slot], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
+}
+
 static uint16_t read_u16(const uint8_t *data)
 {
     return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
@@ -208,6 +242,7 @@ static void refresh_page(void)
         for (slot = 0U; slot < ha.visible_rows; slot++) {
             ha.ui->label_set_text(ha.row_label[slot], "");
             ha.ui->label_set_text(ha.row_value[slot], "");
+            hide_row_icon(slot);
             set_style(ha.row_bg[slot], GM_PLUGIN_LVGL_STYLE_BG_OPA, number(0));
         }
         ha.ui->label_set_text(ha.hint_label,
@@ -259,9 +294,11 @@ static void refresh_page(void)
                               page->rows[row].icon, page->rows[row].label);
                 ha.ui->label_set_text(ha.row_label[slot], row_text);
                 ha.ui->label_set_text(ha.row_value[slot], page->rows[row].value);
+                show_row_icon(slot, page->rows[row].icon);
             } else {
                 ha.ui->label_set_text(ha.row_label[slot], "");
                 ha.ui->label_set_text(ha.row_value[slot], "");
+                hide_row_icon(slot);
             }
             /* Highlight the selected row; the others keep a transparent
              * background so the highlight follows the cursor. */
@@ -408,11 +445,15 @@ static gm_plugin_result_t homeassistant_start(void *context)
         ha.label_width = usable - ha.value_width - gap;
         if (ha.label_width < 0) ha.label_width = 0;
 
-        /* The icon glyph is part of the label text, so the label simply uses
-         * the whole left column. */
-        ha.label_x = SCREEN_MARGIN;
-        ha.host->log("homeassistant: label_x=%d label_w=%d value_w=%d",
-                      (int)ha.label_x, (int)ha.label_width, (int)ha.value_width);
+        /* A dedicated icon column holds the bitmap icon; the letter glyph that
+         * prefixes the label text stays as the guaranteed fallback. */
+        ha.icon_x = SCREEN_MARGIN;
+        ha.label_x = SCREEN_MARGIN + ICON_CELL;
+        ha.label_width -= ICON_CELL;
+        if (ha.label_width < 0) ha.label_width = 0;
+        ha.host->log("homeassistant: icon_x=%d label_x=%d label_w=%d value_w=%d",
+                      (int)ha.icon_x, (int)ha.label_x, (int)ha.label_width,
+                      (int)ha.value_width);
     }
 
     root = ha.ui->root_get();
@@ -466,8 +507,17 @@ static gm_plugin_result_t homeassistant_start(void *context)
         set_style(ha.row_bg[row], GM_PLUGIN_LVGL_STYLE_BORDER_OPA, number(0));
         ha.ui->obj_clear_flag(ha.row_bg[row], GM_PLUGIN_LVGL_FLAG_SCROLLABLE);
 
-        /* The label starts at the left margin and its text is prefixed with
-         * the icon glyph, so the icon always sits left of the entity name. */
+        /* Bitmap icon in its own column, behind the text so the selected-row
+         * bar still shows through around it. */
+        ha.row_icon[row] = ha.ui->image_create(ha.screen, &ha_icons_dsc[HA_ICON_FALLBACK]);
+        if (ha.row_icon[row] == 0) goto no_memory;
+        ha.ui->obj_set_pos(ha.row_icon[row], ha.icon_x,
+                           top_y + (ha.row_height - 2 - (int32_t)HA_ICON_SIZE) / 2);
+        set_style(ha.row_icon[row], GM_PLUGIN_LVGL_STYLE_IMG_OPA, number(0));
+
+        /* The label starts right of the icon column and its text is prefixed
+         * with the letter glyph, so an icon is always visible even if the host
+         * does not render bitmaps. */
         ha.row_label[row] = make_label(ha.screen, "", 0xD0, true);
         if (ha.row_label[row] == 0) goto no_memory;
         ha.ui->obj_set_size(ha.row_label[row], ha.label_width,
@@ -505,6 +555,7 @@ no_memory:
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_bg[row] = 0;
+        ha.row_icon[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -674,6 +725,7 @@ static void homeassistant_stop(void *context)
     ha.title_label = 0;
     for (row = 0U; row < MAX_VISIBLE_ROWS; row++) {
         ha.row_bg[row] = 0;
+        ha.row_icon[row] = 0;
         ha.row_label[row] = 0;
         ha.row_value[row] = 0;
     }
@@ -703,6 +755,10 @@ gm_plugin_result_t gm_plugin_entry(const gm_plugin_host_api_t *host,
 
     ha.host = host;
     ha.ui = host->graphics.lvgl;
+    ha.images_ok = ha.ui->struct_size >= GM_PLUGIN_LVGL_API_1_1_SIZE &&
+        GM_PLUGIN_VERSION_COMPATIBLE(ha.ui->api_version,
+                                     GM_PLUGIN_VERSION(1U, 1U)) &&
+        ha.ui->image_create != 0 && ha.ui->image_set_source != 0;
     if (gm_plugin_libc_get(host, &ha.libc) != GM_PLUGIN_OK)
         return GM_PLUGIN_ENOTSUP;
     plugin->abi_version = GM_PLUGIN_ABI_MIN_VERSION;

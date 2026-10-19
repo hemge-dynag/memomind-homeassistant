@@ -1,7 +1,7 @@
 {
   "id": "com.dynag.homeassistant.glass",
   "name": "GM Home Assistant",
-  "version": 15,
+  "version": 16,
   "abi_version": 256,
   "provides": {
     "protocols": [
