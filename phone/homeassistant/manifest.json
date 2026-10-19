@@ -1,7 +1,7 @@
 {
   "id": "com.dynag.homeassistant.phone",
   "name": "GM Home Assistant",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "entry": "index.html",
   "bridgeVersion": "2.0",
   "permissions": [
@@ -14,7 +14,7 @@
   "deviceRequirements": {
     "preferredPluginId": "com.dynag.homeassistant.glass",
     "requiredPluginId": "com.dynag.homeassistant.glass",
-    "minPluginVersion": "14",
+    "minPluginVersion": "15",
     "protocols": [
       { "id": "gm.homeassistant", "minVersion": "2.0" }
     ]
