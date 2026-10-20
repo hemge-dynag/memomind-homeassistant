@@ -979,6 +979,16 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
         case GM_PLUGIN_IMU_GESTURE_HEAD_RAISE:
             move_selection(-1);
             return true;
+        case GM_PLUGIN_IMU_GESTURE_NOD:
+            if (ha_pages[ha.page_index].image) {
+                /* A nod is reported by its own gesture id; treat it as the
+                 * documented "nod down" reload for picture pages. */
+                ha.image_page = NO_PAGE;
+                request_card_image();
+                refresh_page();
+                return true;
+            }
+            break;
         case GM_PLUGIN_IMU_GESTURE_HEAD_LOWER:
             if (ha_pages[ha.page_index].image) {
                 /* Image pages have no rows; a nod fetches (or refreshes) the
@@ -992,6 +1002,14 @@ static bool homeassistant_event(void *context, const gm_plugin_event_t *event)
             return true;
         default:
             break;
+        }
+        /* Any other gesture (or a picture page one) refreshes the picture, so
+         * nudging the head never leaves the wearer stuck on a blank page. */
+        if (ha_pages[ha.page_index].image) {
+            ha.image_page = NO_PAGE;
+            request_card_image();
+            refresh_page();
+            return true;
         }
     }
     return false;

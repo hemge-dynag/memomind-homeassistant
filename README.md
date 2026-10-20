@@ -77,9 +77,9 @@ defini, sinon le `friendly_name` Home Assistant, sinon l'`entity_id`.
 - **Tete baissee** : selection vers le bas.
 - **Bouton** : execute l'action de la ligne selectionnee (l'unite est
   allumee/eteinte, la scene est lancee…).
-- Sur une page **image**, incliner la tete vers le bas ou appuyer sur le bouton
-  recharge l'image de la carte (elle arrive toute seule a l'ouverture de la
-  page ; le geste sert apres une actualisation).
+- Sur une page **image**, n'importe quel geste de la tete (tete baissee,
+  hochement, tete levee) ou le bouton recharge l'image de la carte (elle arrive
+  toute seule a l'ouverture de la page ; le geste sert apres une actualisation).
 - Navigation **circulaire** (on revient a la premiere apres la derniere).
 
 Chaque page affiche un titre avec sa position `i/n` (et `lignes visibles/total`
